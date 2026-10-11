@@ -17,6 +17,17 @@ use std::collections::HashMap;
 const MAXSTR: usize = 4000;
 const DIB_MAGIC: [u8; 4] = [0x28, 0x00, 0x00, 0x00];
 
+/// Click-hotspot map: one byte per pixel (bottom-up, `width` wide) indexing
+/// `colors`; the color under the cursor names the touch sequence
+/// (`T` + python-style hex + state) defined in the same file.
+#[derive(Clone, Debug)]
+pub struct Touch {
+    pub colors: Vec<u32>,
+    pub width: u32,
+    pub height: u32,
+    pub bitmap: Vec<u8>,
+}
+
 /// One parsed FAZ container (the subset the engine needs).
 pub struct Faz {
     pub name: String,
@@ -30,6 +41,8 @@ pub struct Faz {
     /// True when the frame table used the new count-prefixed form.
     pub count_table: bool,
     pub frame_flags: HashMap<u16, u8>,
+    /// Hotspot bitmap, present on touch.FAS containers.
+    pub touch: Option<Touch>,
 }
 
 fn le16(d: &[u8], i: usize) -> Option<u16> {
@@ -82,6 +95,92 @@ fn try_count_table(d: &[u8], c: usize, bs: usize) -> Option<(Vec<u16>, Vec<u8>, 
     Some((ids, flags, c + 4 + 3 * v))
 }
 
+/// The first `T0x<hex><state>\0` touch-sequence name in `d`, backed up to the
+/// start of its NUL-terminated token. touch.FAS seq sections begin with these;
+/// the generic printable-string heuristic fires inside the hotspot bitmap.
+fn find_touch_seq_start(d: &[u8], from: usize) -> Option<usize> {
+    const STATES: [&[u8]; 5] = [b"up", b"down", b"start", b"loop", b"stop"];
+    let mut p = from;
+    while p + 4 < d.len() {
+        if d[p] == b'T' && d.get(p + 1..p + 3) == Some(&b"0x"[..]) {
+            let mut q = p + 3;
+            while q < d.len() && d[q].is_ascii_hexdigit() {
+                q += 1;
+            }
+            for st in STATES.iter() {
+                if d.get(q..q + st.len()) == Some(*st) && d.get(q + st.len()) == Some(&0) {
+                    let mut s = p;
+                    while s > from && d[s - 1] != 0 {
+                        s -= 1;
+                    }
+                    return Some(s);
+                }
+            }
+        }
+        p += 1;
+    }
+    None
+}
+
+/// Locate the hotspot section (color table + bottom-up 8bpp bitmap) that sits
+/// between the DIB templates and the seq section. Validated against the hex
+/// colors actually referenced by the parsed `T0x…` sequence names.
+fn find_touch_section(d: &[u8], from: usize, to: usize, height: u32, pairs: &[String]) -> Option<Touch> {
+    let mut want: Vec<u32> = Vec::new();
+    for p in pairs {
+        let Some(rest) = p
+            .strip_prefix("T0x")
+            .or_else(|| p.strip_prefix("Demo_T0x"))
+        else {
+            continue;
+        };
+        let hex: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+        if !hex.is_empty() {
+            if let Ok(v) = u32::from_str_radix(&hex, 16) {
+                want.push(v);
+            }
+        }
+    }
+    if want.is_empty() {
+        return None;
+    }
+    for p in from..to.saturating_sub(6) {
+        let tc = le16(d, p)? as usize;
+        if tc == 0 || tc > 256 {
+            continue;
+        }
+        let tw = le16(d, p + 2 + tc * 4)? as usize;
+        if tw == 0 || tw > 1024 {
+            continue;
+        }
+        let bmp = p + 4 + tc * 4;
+        let need = bmp.checked_add(tw.checked_mul(height as usize)?)?;
+        if need > d.len() {
+            continue;
+        }
+        let colors: Vec<u32> = (0..tc).map(|k| le32(d, p + 2 + k * 4).unwrap_or(0)).collect();
+        let bitmap = &d[bmp..need];
+        if bitmap.iter().take(4096).any(|&b| b as usize >= tc) {
+            continue;
+        }
+        let ok = want.iter().any(|w| {
+            colors
+                .iter()
+                .position(|c| c == w)
+                .is_some_and(|ix| bitmap.contains(&(ix as u8)))
+        });
+        if ok {
+            return Some(Touch {
+                colors,
+                width: tw as u32,
+                height,
+                bitmap: bitmap.to_vec(),
+            });
+        }
+    }
+    None
+}
+
 /// Parse FAZ bytes; `None` if the file is not a parseable container
 /// (mirrors the exceptions `faz.parse_faz` raises, which callers skip).
 pub fn parse_faz(d: &[u8]) -> Option<Faz> {
@@ -114,8 +213,10 @@ pub fn parse_faz(d: &[u8]) -> Option<Faz> {
         i += 40 + ncol * 4;
     }
 
-    // script: first position with >=3 consecutive NUL-term printable strings
-    let mut s = i;
+    // script: first position with >=3 consecutive NUL-term printable strings.
+    // touch.FAS seq sections start at the first `T0x…` name (the generic
+    // heuristic would land inside the hotspot bitmap).
+    let mut s = find_touch_seq_start(d, i).filter(|p| *p > i).unwrap_or(i);
     let mut found = false;
     while s < d.len().saturating_sub(4) && !found {
         let mut p = s;
@@ -157,6 +258,13 @@ pub fn parse_faz(d: &[u8]) -> Option<Faz> {
         pairs.push(latin1(t));
         s = e + 1;
     }
+
+    // Hotspot bitmap (touch.FAS): sits between the DIBs and the seq section.
+    let touch = if pairs.iter().any(|p| p.starts_with("T0x") || p.starts_with("Demo_T0x")) {
+        find_touch_section(d, i, s, dims.map(|(_, h)| h).unwrap_or(200), &pairs)
+    } else {
+        None
+    };
 
     // frame table: count form (window around script end, then full-file
     // scan per maeka.py), else the old 0xffff-terminated scan.
@@ -220,13 +328,12 @@ pub fn parse_faz(d: &[u8]) -> Option<Faz> {
         frames.insert(id, blk);
     }
 
-    Some(Faz { name, dibs, pairs, frames, dims, bpp, count_table, frame_flags })
+    Some(Faz { name, dibs, pairs, frames, dims, bpp, count_table, frame_flags, touch })
 }
 
 // ---------------------------------------------------------------------------
 // Script parsing (port of faz_convert.py main() def/entry extraction)
 // ---------------------------------------------------------------------------
-
 /// One token of a parsed def body; mirrors the dicts `parse_reflist` emits
 /// (frame tokens carry id/x/y, name tokens carry name; rep defaults to 1).
 pub enum Tok {
@@ -997,5 +1104,47 @@ mod audit_strips {
             strip.save(format!("/tmp/strips/{sc}.png")).unwrap();
             println!("{sc}: {} frames", ids.len());
         }
+    }
+}
+
+#[cfg(test)]
+mod touch_tests {
+    use super::*;
+
+    /// touch.FAS must yield its hotspot bitmap and the `T0x…` reaction defs
+    /// (the click-to-sound wiring depends on both).
+    #[test]
+    fn touch_fas_parses() {
+        let raw = {
+            let f = std::fs::File::open(format!(
+                "{}/assets/characters/tahni/behaviors/touch.fas.gz",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap();
+            let mut b = Vec::new();
+            std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(f), &mut b).unwrap();
+            b
+        };
+        let f = parse_faz(&raw).unwrap();
+        let t = f.touch.as_ref().expect("touch bitmap parsed");
+        assert_eq!((t.width, t.height, t.bitmap.len()), (200, 200, 40000));
+        assert_eq!(t.colors.len(), 256);
+        let (_e, defs) = script_defs(&f);
+        assert!(defs.len() > 100, "got {} defs", defs.len());
+        let names: Vec<&String> = defs.iter().map(|(k, _)| k).filter(|k| k.starts_with("T0x")).collect();
+        assert!(names.len() > 100);
+        // The bitmap's color indices must resolve to colors that name defs.
+        let mut hit = false;
+        for (k, _) in &defs {
+            if let Some(rest) = k.strip_prefix("T0x") {
+                let hex: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
+                let v = u32::from_str_radix(&hex, 16).unwrap();
+                if t.colors.contains(&v) {
+                    hit = true;
+                    break;
+                }
+            }
+        }
+        assert!(hit, "no def color present in hotspot palette");
     }
 }

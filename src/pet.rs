@@ -156,6 +156,48 @@ impl Pet {
         self.walk_dir
     }
 
+    /// Click at native sprite coords: resolve the touch.FAS hotspot under the
+    /// cursor (bottom-up 8bpp bitmap → color → `T0x<hex>` sequence) and play
+    /// its reaction (voice line + animation). Falls back to a random reaction
+    /// scene when the hotspot has no playable definition.
+    pub fn touch_at(&mut self, nx: f64, ny: f64) {
+        let Some(t) = self.scenes.touch.as_ref() else {
+            self.touch();
+            return;
+        };
+        let bx = nx.floor();
+        let by = t.height as f64 - 1.0 - ny.floor();
+        if bx < 0.0 || by < 0.0 || bx >= t.width as f64 || by >= t.height as f64 {
+            self.touch();
+            return;
+        }
+        let ix = by as usize * t.width as usize + bx as usize;
+        let color = match t.bitmap.get(ix).and_then(|&v| t.colors.get(v as usize)) {
+            Some(c) => *c,
+            None => {
+                self.touch();
+                return;
+            }
+        };
+        // Definition names are `T0x` + 6 lowercase hex digits (python
+        // `%06x` of the hotspot color) + state; a tap is press+release, so
+        // prefer the full `up` reaction, then `down`, then `start`.
+        let base = format!("T0x{color:06x}");
+        for suf in ["up", "down", "start"] {
+            let def = format!("{base}{suf}");
+            if self
+                .scenes
+                .scenes
+                .get("touch")
+                .map_or(false, |s| s.raw.contains_key(&def))
+            {
+                self.play("touch", &def);
+                return;
+            }
+        }
+        self.touch();
+    }
+
     /// Click on the sprite: interrupt with a touch reaction.
     pub fn touch(&mut self) {
         if let Some((scene, entry)) = self.reactions.choose(&mut rand::rng()).cloned() {

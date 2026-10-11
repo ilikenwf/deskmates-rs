@@ -84,6 +84,8 @@ pub struct Scenes {
     /// Names loaded from `behaviors/` (common.FAS etc.): def sources, never
     /// part of the random idle pool or the window-size vote.
     pub behaviors: std::collections::HashSet<String>,
+    /// Click-hotspot map from touch.FAS (colors + bottom-up bitmap).
+    pub touch: Option<faz::Touch>,
 }
 
 impl Scenes {
@@ -174,6 +176,7 @@ impl Scenes {
         // (blink, pause pools, enter sequences) and their own frames, but
         // are never played as random scenes.
         let mut behaviors = std::collections::HashSet::new();
+        let mut touch_map: Option<faz::Touch> = None;
         let bdir = dir.join("behaviors");
         for name in BEHAVIOR_NAMES {
             let path = bdir.join(format!("{name}.fas.gz"));
@@ -205,13 +208,16 @@ impl Scenes {
             defmap.remove("dialog_buy_me_now");
             rawmap.remove("dialog_buy_me_now");
             scenes.insert(name.to_string(), Scene { name: name.to_string(), entries, defs: defmap, raw: rawmap, w, h });
+            if *name == "touch" {
+                touch_map = f.touch.clone();
+            }
             fazs.insert(name.to_string(), f);
             behaviors.insert(name.to_string());
         }
         if scenes.is_empty() {
             return Err(format!("{}: no scenes parsed", sdir.display()));
         }
-        Ok(Scenes { dir: dir.to_path_buf(), scenes, faz: fazs, cache: Mutex::new(HashMap::new()), behaviors })
+        Ok(Scenes { dir: dir.to_path_buf(), scenes, faz: fazs, cache: Mutex::new(HashMap::new()), behaviors, touch: touch_map })
     }
 
     pub fn frame(&self, scene: &str, id: u32) -> Option<RgbaImage> {

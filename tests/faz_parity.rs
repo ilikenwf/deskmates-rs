@@ -75,6 +75,7 @@ fn placeholder_rule() {
         bpp: None,
         count_table: false,
         frame_flags: Default::default(),
+        touch: None,
     };
     assert!(faz::is_placeholder(&mk(vec![])));
     assert!(faz::is_placeholder(&mk(vec![&[1]])));
