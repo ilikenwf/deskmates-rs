@@ -568,3 +568,281 @@ pub fn decode_frame(f: &Faz, id: u16) -> Option<RgbaImage> {
     }
     Some(img)
 }
+
+/// Audit tool: labeled contact sheets of every scene (4 sampled frames each)
+/// for visual content classification. Run: `cargo test sheet_dump -- --ignored --nocapture`
+#[cfg(test)]
+mod sheet_tests {
+    use super::*;
+    use ab_glyph::{Font as _, FontArc, PxScale, ScaleFont};
+    use image::ImageBuffer;
+
+    fn put_text(img: &mut RgbaImage, font: &FontArc, text: &str, x: u32, y: u32, sz: f32) {
+        let scale = PxScale { x: sz, y: sz };
+        let sf = font.as_scaled(scale);
+        let mut pen = x as f32;
+        for g in text.chars() {
+            let gid = sf.glyph_id(g);
+            let glyph = gid.with_scale_and_position(scale, ab_glyph::point(pen, y as f32));
+            if let Some(v) = font.outline_glyph(glyph) {
+                let b = v.px_bounds();
+                v.draw(|gx, gy, cov| {
+                    let px = b.min.x as i32 + gx as i32;
+                    let py = b.min.y as i32 + gy as i32;
+                    if cov > 0.4 && px >= 0 && py >= 0 && (px as u32) < img.width() && (py as u32) < img.height() {
+                        img.put_pixel(px as u32, py as u32, image::Rgba([255, 255, 0, 255]));
+                    }
+                });
+            }
+            pen += sf.h_advance(gid);
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn sheet_dump() {
+        let root = format!("{}/assets/characters", env!("CARGO_MANIFEST_DIR"));
+        let font = FontArc::try_from_vec(
+            std::fs::read(format!("{root}/../fonts/LiberationSans-Regular.ttf")).unwrap(),
+        )
+        .unwrap();
+        for ch in ["tahni", "maeka", "kahli", "fatb"] {
+            let dir = format!("{root}/{ch}/scenes");
+            let mut files: Vec<_> = std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| p.extension().is_none() || p.extension().unwrap() == "gz")
+                .collect();
+            files.sort();
+            let (tw, th) = (140u32, 200u32); // tile incl. label
+            let cols = 6usize;
+            let per_sheet = 24;
+            let mut sheet: Option<ImageBuffer<image::Rgba<u8>, Vec<u8>>> = None;
+            for (i, path) in files.iter().enumerate() {
+                let name = path.file_name().unwrap().to_string_lossy().replace(".bin.gz", "");
+                let gz = std::fs::File::open(path).unwrap();
+                let mut raw = Vec::new();
+                std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(gz), &mut raw).unwrap();
+                let Some(f) = parse_faz(&raw) else { continue };
+                let mut ids: Vec<u16> = f.frames.keys().copied().collect();
+                ids.sort();
+                if ids.is_empty() {
+                    continue;
+                }
+                let slot = i % per_sheet;
+                if slot == 0 {
+                    if let Some(s) = sheet.take() {
+                        s.save(format!("/tmp/sheets/{ch}_{}.png", i / per_sheet)).unwrap();
+                    }
+                    sheet = Some(ImageBuffer::from_pixel(cols as u32 * tw, (per_sheet / cols) as u32 * th, image::Rgba([24, 24, 24, 255])));
+                }
+                let img = sheet.as_mut().unwrap();
+                let (cx, cy) = ((slot % cols) as u32 * tw, (slot / cols) as u32 * th);
+                put_text(img, &font, &name, cx + 2, cy + 2, 11.0);
+                // 4 sampled frames across the scene timeline
+                for (k, frac) in [0.25f32, 0.5, 0.75, 0.95].iter().enumerate() {
+                    let id = ids[((ids.len() as f32 * *frac) as usize).min(ids.len() - 1)];
+                    let Some(fr) = decode_frame(&f, id) else { continue };
+                    let (fw, fh) = (fr.width(), fr.height());
+                    let sc = (120.0 / fw as f32).min(160.0 / fh as f32).min(1.0);
+                    let (dw, dh) = ((fw as f32 * sc) as u32, (fh as f32 * sc) as u32);
+                    let small = image::imageops::resize(&fr, dw.max(1), dh.max(1), image::imageops::FilterType::Nearest);
+                    let ox = cx + (k as u32 % 2) * 70 + 1;
+                    let oy = cy + 16 + (k as u32 / 2) * 92;
+                    for y in 0..dh.min(90) {
+                        for x in 0..dw.min(68) {
+                            let p = small.get_pixel(x, y).0;
+                            if p[3] > 40 {
+                                img.put_pixel(ox + x, oy + y, image::Rgba(p));
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(s) = sheet.take() {
+                s.save(format!("/tmp/sheets/{ch}_last.png")).unwrap();
+            }
+            println!("{ch}: {} scenes", files.len());
+        }
+    }
+
+    /// Skin-ratio per scene: max over 4 sampled frames of fraction of opaque
+    /// pixels in Tahni-skin RGB range. Ranks scenes for visual audit.
+    #[test]
+    #[ignore]
+    fn skin_rank() {
+        let root = format!("{}/assets/characters", env!("CARGO_MANIFEST_DIR"));
+        for ch in ["tahni", "maeka", "kahli", "fatb"] {
+            let dir = format!("{root}/{ch}/scenes");
+            let mut files: Vec<_> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).collect();
+            files.sort();
+            let mut rows: Vec<(f64, String)> = Vec::new();
+            for path in &files {
+                let name = path.file_name().unwrap().to_string_lossy().replace(".bin.gz", "");
+                let gz = std::fs::File::open(path).unwrap();
+                let mut raw = Vec::new();
+                std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(gz), &mut raw).unwrap();
+                let Some(f) = parse_faz(&raw) else { continue };
+                let mut ids: Vec<u16> = f.frames.keys().copied().collect();
+                ids.sort();
+                if ids.is_empty() { continue; }
+                let mut best = 0.0f64;
+                for frac in [0.3f32, 0.55, 0.8, 0.95] {
+                    let id = ids[((ids.len() as f32 * frac) as usize).min(ids.len() - 1)];
+                    let Some(fr) = decode_frame(&f, id) else { continue };
+                    let (mut skin, mut op) = (0u64, 0u64);
+                    for px in fr.pixels() {
+                        let [r, g, b, a] = px.0;
+                        if a > 40 {
+                            op += 1;
+                            if (r > 190 && g > 120 && g < 210 && b > 90 && b < 190 && r > g && g > b) || (r >= 230 && g >= 170 && g <= 235 && b >= 130 && b <= 200) {
+                                skin += 1;
+                            }
+                        }
+                    }
+                    if op > 0 {
+                        best = best.max(skin as f64 / op as f64);
+                    }
+                }
+                rows.push((best, name));
+            }
+            rows.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+            println!("### {ch}");
+            for (r, n) in rows {
+                println!("{r:.3} {n}");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod skin_probe {
+    use super::*;
+    #[test]
+    #[ignore]
+    fn tahni_colors() {
+        let path = format!("{}/assets/characters/tahni/scenes/beach.bin.gz", env!("CARGO_MANIFEST_DIR"));
+        let gz = std::fs::File::open(&path).unwrap();
+        let mut raw = Vec::new();
+        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(gz), &mut raw).unwrap();
+        let f = parse_faz(&raw).unwrap();
+        let mut ids: Vec<u16> = f.frames.keys().copied().collect();
+        ids.sort();
+        let fr = decode_frame(&f, ids[ids.len() / 2]).unwrap();
+        let mut hist = std::collections::HashMap::new();
+        for px in fr.pixels() {
+            if px.0[3] > 40 {
+                *hist.entry(px.0).or_insert(0u64) += 1;
+            }
+        }
+        let mut v: Vec<_> = hist.into_iter().collect();
+        v.sort_by_key(|(_, n)| -(*n as i64));
+        for (c, n) in v.iter().take(12) {
+            println!("{c:?} {n}");
+        }
+    }
+}
+
+/// Large audit strips for ranked scenes: 4 frames per scene at ~2x sheet size.
+#[cfg(test)]
+mod audit_tests {
+    use super::*;
+    use ab_glyph::{Font as _, FontArc, PxScale, ScaleFont};
+    use image::ImageBuffer;
+
+    fn put_text(img: &mut RgbaImage, font: &FontArc, text: &str, x: u32, y: u32, sz: f32) {
+        let scale = PxScale { x: sz, y: sz };
+        let sf = font.as_scaled(scale);
+        let mut pen = x as f32;
+        for g in text.chars() {
+            let gid = sf.glyph_id(g);
+            let glyph = gid.with_scale_and_position(scale, ab_glyph::point(pen, y as f32));
+            if let Some(v) = font.outline_glyph(glyph) {
+                let b = v.px_bounds();
+                v.draw(|gx, gy, cov| {
+                    let px = b.min.x as i32 + gx as i32;
+                    let py = b.min.y as i32 + gy as i32;
+                    if cov > 0.4 && px >= 0 && py >= 0 && (px as u32) < img.width() && (py as u32) < img.height() {
+                        img.put_pixel(px as u32, py as u32, image::Rgba([255, 255, 0, 255]));
+                    }
+                });
+            }
+            pen += sf.h_advance(gid);
+        }
+    }
+
+    fn is_placeholder_faz(ch: &str, name: &str) -> bool {
+        let path = format!("{}/assets/characters/{ch}/scenes/{name}.bin.gz", env!("CARGO_MANIFEST_DIR"));
+        let Ok(gz) = std::fs::File::open(&path) else { return true };
+        let mut raw = Vec::new();
+        if std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(gz), &mut raw).is_err() { return true; }
+        match parse_faz(&raw) { Some(f) => crate::faz::is_placeholder(&f), None => true }
+    }
+
+    fn strip(ch: &str, name: &str, font: &FontArc) -> Option<RgbaImage> {
+        let path = format!("{}/assets/characters/{ch}/scenes/{name}.bin.gz", env!("CARGO_MANIFEST_DIR"));
+        let gz = std::fs::File::open(&path).ok()?;
+        let mut raw = Vec::new();
+        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(gz), &mut raw).ok()?;
+        let f = parse_faz(&raw)?;
+        let mut ids: Vec<u16> = f.frames.keys().copied().collect();
+        ids.sort();
+        if ids.is_empty() {
+            return None;
+        }
+        let mut out = ImageBuffer::from_pixel(4 * 170, 230, image::Rgba([30, 30, 30, 255]));
+        put_text(&mut out, font, name, 2, 2, 15.0);
+        for (k, frac) in [0.3f32, 0.55, 0.8, 0.97].iter().enumerate() {
+            let id = ids[((ids.len() as f32 * *frac) as usize).min(ids.len() - 1)];
+            let Some(fr) = decode_frame(&f, id) else { continue };
+            let (fw, fh) = (fr.width(), fr.height());
+            let sc = (165.0 / fw as f32).min(200.0 / fh as f32).min(1.0);
+            let (dw, dh) = ((fw as f32 * sc) as u32, (fh as f32 * sc) as u32);
+            let small = image::imageops::resize(&fr, dw.max(1), dh.max(1), image::imageops::FilterType::Nearest);
+            for y in 0..dh {
+                for x in 0..dw {
+                    let p = small.get_pixel(x, y).0;
+                    if p[3] > 40 {
+                        out.put_pixel(k as u32 * 170 + 2 + x, 24 + y, image::Rgba(p));
+                    }
+                }
+            }
+        }
+        Some(out)
+    }
+
+    #[test]
+    #[ignore]
+    fn audit_tahni() {
+        let font = FontArc::try_from_vec(
+            std::fs::read(format!("{}/assets/fonts/LiberationSans-Regular.ttf", env!("CARGO_MANIFEST_DIR"))).unwrap(),
+        )
+        .unwrap();
+        let mut scenes: Vec<String> = std::fs::read_dir(format!("{}/assets/characters/tahni/scenes", env!("CARGO_MANIFEST_DIR")))
+            .unwrap()
+            .map(|e| e.unwrap().path().file_name().unwrap().to_string_lossy().replace(".bin.gz", ""))
+            .filter(|n| !n.starts_with('.'))
+            .collect();
+        scenes.sort();
+        let mut rows: Vec<(String, RgbaImage)> = Vec::new();
+        for s in &scenes {
+            let Some(st) = strip("tahni", s, &font) else { continue };
+            if is_placeholder_faz("tahni", s) { continue; }
+            rows.push((s.clone(), st));
+        }
+        let per = 6;
+        for (idx, chunk) in rows.chunks(per).enumerate() {
+            let mut sheet = ImageBuffer::from_pixel(680, (per * 230) as u32, image::Rgba([10, 10, 10, 255]));
+            for (i, (name, st)) in chunk.iter().enumerate() {
+                for y in 0..230 {
+                    for x in 0..680 {
+                        sheet.put_pixel(x, i as u32 * 230 + y, *st.get_pixel(x, y));
+                    }
+                }
+                put_text(&mut sheet, &font, name, 2, (i as u32) * 230 + 2, 22.0);
+            }
+            sheet.save(format!("/tmp/audit/tahni_{idx:02}.png")).unwrap();
+        }
+        println!("{} strips", rows.len());
+    }
+}
