@@ -1,0 +1,13 @@
+/target
+__pycache__/
+# raw installer artifacts: re-downloadable from archive.org (see README)
+analysis/*.exe
+analysis/*.rar
+analysis/*.zip
+analysis/*.cab
+analysis/extracted/
+analysis/tahni_real/
+analysis/tahni_files/
+analysis/basic_real/
+analysis/*.bin
+analysis/t.exe
