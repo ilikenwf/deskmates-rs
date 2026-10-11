@@ -1,17 +1,9 @@
 /target
 __pycache__/
-# raw installer artifacts: re-downloadable from archive.org (see README)
-analysis/*.exe
-analysis/*.rar
-analysis/*.zip
-analysis/*.cab
-analysis/extracted/
-analysis/tahni_real/
-analysis/tahni_files/
-analysis/basic_real/
-analysis/*.bin
-analysis/t.exe
-analysis/maeka_real/
-analysis/maeka_extract/
-analysis/kahli_real/
-analysis/kahli_extract/
+
+# analysis/: keep only the reverse-engineering scripts + notes in git.
+# Everything else (raw installers, extracted streams, packed 3D scenes) is
+# re-derivable from the archive.org originals — see README provenance.
+analysis/*
+!analysis/*.py
+!analysis/*.txt
