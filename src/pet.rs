@@ -116,6 +116,21 @@ impl Pet {
         self.start_random();
     }
 
+    /// Play a scene by (partial) name — used for agent stage directions.
+    /// Matches scene names equal to or prefixed by `name`.
+    pub fn play_named(&mut self, name: &str) -> bool {
+        if let Some((scene, entry)) = self
+            .entries
+            .iter()
+            .find(|(s, _)| s == name || s.starts_with(name))
+            .cloned()
+        {
+            self.play(&scene, &entry);
+            return true;
+        }
+        false
+    }
+
     pub fn tick(&mut self, now: Instant) -> bool {
         let mut changed = false;
         // Idle gap.

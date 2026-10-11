@@ -19,6 +19,16 @@ rand = "0.9"
 parking_lot = "0.12"
 libc = "0.2"
 tray-icon = "0.19"
+# Optional agent chat ("Ask Tahni…"). Only ever contacted when the user
+# configures an endpoint (Settings dialog / config file); the pet itself
+# never touches the network otherwise. rustls keeps it pure-Rust + https.
+# Disable (`--no-default-features`) for cross-checks: ring cannot build for
+# windows-msvc/apple targets from a Linux GNU host.
+ureq = { version = "2", default-features = false, features = ["json", "rustls"], optional = true }
+
+[features]
+default = ["agent"]
+agent = ["dep:ureq"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # libappindicator tray support pumps the default GMainContext.

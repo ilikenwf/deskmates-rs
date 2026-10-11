@@ -13,6 +13,8 @@
 //! This binary contains zero network code. All content is local, all scenes
 //! are unlocked.
 
+mod agent;
+mod ask_ui;
 mod pet;
 mod scenes;
 
@@ -38,11 +40,14 @@ pub struct Config {
     pub x: Option<i32>,
     pub y: Option<i32>,
     pub character: String,
+    pub agent_endpoint: String,
+    pub agent_key: String,
+    pub agent_model: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { scale: 1.0, x: None, y: None, character: "tahni".into() }
+        Config { scale: 1.0, x: None, y: None, character: "tahni".into(), agent_endpoint: String::new(), agent_key: String::new(), agent_model: String::new() }
     }
 }
 
@@ -74,9 +79,48 @@ fn load_config() -> Config {
     cfg
 }
 
+fn save_config(cfg: &Config) {
+    if let Some(p) = config_path() {
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(b) = serde_json::to_vec_pretty(cfg) {
+            let _ = std::fs::write(p, b);
+        }
+    }
+}
+
+/// Question handoff file written by the forked Ask window (mtime-polled by
+/// the pet loop).
+pub fn ask_path() -> std::path::PathBuf {
+    config_path()
+        .map(|p| p.with_extension("ask"))
+        .unwrap_or_else(|| std::path::PathBuf::from("deskmates-rs.ask"))
+}
+
+fn ask_mtime() -> Option<std::time::SystemTime> {
+    std::fs::metadata(ask_path()).ok().and_then(|m| m.modified().ok())
+}
+
+fn cfg_mtime() -> Option<std::time::SystemTime> {
+    config_path().and_then(|p| std::fs::metadata(p).ok().and_then(|m| m.modified().ok()))
+}
+
+/// Fork a WM-managed child window (Ask / Settings): the pet window is
+/// override-redirect and never gets keyboard focus; the child does.
+fn fork_child(arg: &str) {
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::process::Command::new(exe).arg(arg).spawn();
+    }
+}
+
 fn save_state(window: Option<&Window>, scale: f64, character: &str) {
     let pos = window.and_then(|w| w.outer_position().ok());
-    let cfg = Config { scale: scale.clamp(0.5, 4.0), x: pos.map(|p| p.x), y: pos.map(|p| p.y), character: character.into() };
+    let mut cfg = load_config();
+    cfg.scale = scale.clamp(0.5, 4.0);
+    cfg.x = pos.map(|p| p.x);
+    cfg.y = pos.map(|p| p.y);
+    cfg.character = character.into();
     if let Some(p) = config_path() {
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -130,7 +174,9 @@ struct MenuItem {
 
 const MENU: &[MenuItem] = &[
     MenuItem { label: "Touch her" },
+    MenuItem { label: "Ask Tahni…" },
     MenuItem { label: "Next scene" },
+    MenuItem { label: "Settings…" },
     MenuItem { label: "Hide" },
     MenuItem { label: "About" },
     MenuItem { label: "Quit" },
@@ -152,6 +198,13 @@ struct App {
     menu_open: bool,
     menu_rects: Vec<(usize, (i32, i32, i32, i32))>,
     about_until: Option<Instant>,
+    agent: agent::AgentCfg,
+    agent_tx: std::sync::mpsc::Sender<agent::Msg>,
+    agent_rx: std::sync::mpsc::Receiver<agent::Msg>,
+    /// Speech bubble: text shown until the given instant.
+    bubble: Option<(String, Instant)>,
+    ask_mtime: Option<std::time::SystemTime>,
+    cfg_mtime: Option<std::time::SystemTime>,
     tray: Option<tray_icon::TrayIcon>,
     last_move: Instant,
     /// Fractional window x for smooth walking.
@@ -163,6 +216,11 @@ impl App {
         (WIN as f64 * self.scale) as u32
     }
 
+    /// Show text in the speech bubble for a duration scaled by length.
+    fn speak(&mut self, text: &str) {
+        let secs = (2.5 + text.chars().count() as f64 * 0.06).min(14.0);
+        self.bubble = Some((text.to_string(), Instant::now() + Duration::from_secs_f64(secs)));
+    }
     /// Walk the window along the bottom of the monitor per pet.walk_dir().
     fn apply_walk(&mut self, now: Instant) {
         let Some(w) = &self.window else { return };
@@ -210,6 +268,27 @@ impl App {
                     let ox = (sp.x as f64 * self.scale * sf) as i32;
                     let oy = (sp.y as f64 * self.scale * sf) as i32;
                     blit(&mut canvas, w, h, &img, ox, oy, s);
+                }
+            }
+        }
+        // speech bubble (top of window, over the sprite)
+        if let Some((text, until)) = self.bubble.clone() {
+            if Instant::now() >= until {
+                self.bubble = None;
+            } else {
+                let s = (sf * self.scale.max(1.0)) as f32;
+                let scale = PxScale::from(10.0 * s);
+                let lh = line_height(&self.font, scale);
+                let bw = (w as i32 - 6).max(1);
+                let lines: Vec<String> = wrap(&self.font, &text, (bw - 12) as f32, scale)
+                    .into_iter().take(6).collect();
+                let bh = (lh * (lines.len() as f32 + 0.8)) as i32;
+                fill_rect(&mut canvas, w, h, 3, 3, bw, bh, [255, 255, 240, 242]);
+                stroke_rect(&mut canvas, w, h, 3, 3, bw, bh, [176, 48, 96, 255]);
+                let mut y = 3.0 + lh;
+                for line in &lines {
+                    draw_text(&mut canvas, w, h, &self.font, line, 9.0, y, scale, [20, 20, 25, 255]);
+                    y += lh;
                 }
             }
         }
@@ -277,7 +356,15 @@ impl App {
                 self.menu_open = false;
                 match MENU[*i].label {
                     "Touch her" => self.pet.touch(),
+                    "Ask Tahni…" => {
+                        if self.agent.enabled() {
+                            fork_child("--ask-ui");
+                        } else {
+                            self.speak("I can chat, but no AI endpoint is set. Right-click, Settings… to add one!");
+                        }
+                    }
                     "Next scene" => self.pet.next_scene(),
+                    "Settings…" => fork_child("--settings-ui"),
                     "Hide" => {
                         if let Some(w) = &self.window {
                             w.set_visible(false);
@@ -351,6 +438,11 @@ fn line_height(font: &FontArc, scale: PxScale) -> f32 {
     (sf.ascent() - sf.descent() + sf.line_gap()).max(scale.y * 1.15)
 }
 
+fn text_width(font: &FontArc, text: &str, scale: PxScale) -> f32 {
+    let sf = font.as_scaled(scale);
+    text.chars().map(|c| sf.h_advance(sf.glyph_id(c))).sum()
+}
+
 fn wrap(font: &FontArc, text: &str, max_w: f32, scale: PxScale) -> Vec<String> {
     let sf = font.as_scaled(scale);
     let mut lines = Vec::new();
@@ -404,7 +496,15 @@ fn draw_text(c: &mut [u8], cw: u32, ch: u32, font: &FontArc, text: &str, x: f32,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<String> = std::env::args().collect();
+    // Child modes: forked WM-managed windows (real keyboard focus).
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.iter().any(|a| a == "--ask-ui") {
+        return ask_ui::run(true).map(|_| ());
+    }
+    if argv.iter().any(|a| a == "--settings-ui") {
+        return ask_ui::run(false).map(|_| ());
+    }
+    let args: Vec<String> = argv;
     let matte = args.iter().any(|a| a == "--matte");
     let cfg = load_config();
     let character = args
@@ -429,6 +529,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sc = Arc::new(sc);
     let font = FontArc::try_from_vec(std::fs::read(root.join("fonts/LiberationSans-Regular.ttf"))?)?;
     let pet = Pet::new(sc.clone());
+    let mut agent_cfg = agent::AgentCfg {
+        endpoint: cfg.agent_endpoint.clone(),
+        key: cfg.agent_key.clone(),
+        model: cfg.agent_model.clone(),
+    };
+    // Env overrides win: handy for one-off `DESKMATES_AGENT_ENDPOINT=...` runs.
+    if let Ok(ep) = std::env::var("DESKMATES_AGENT_ENDPOINT") {
+        if !ep.trim().is_empty() {
+            agent_cfg.endpoint = ep;
+        }
+    }
+    if let Ok(k) = std::env::var("DESKMATES_AGENT_KEY") {
+        if !k.trim().is_empty() {
+            agent_cfg.key = k;
+        }
+    }
+    let (agent_tx, agent_rx) = std::sync::mpsc::channel();
 
     let mut app = App {
         pet,
@@ -439,6 +556,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         character,
         display,
         pixels: None,
+        agent: agent_cfg,
+        agent_tx,
+        agent_rx,
+        bubble: None,
+        ask_mtime: ask_mtime(),
+        cfg_mtime: cfg_mtime(),
         window: None,
         size: (1, 1),
         mouse: (0.0, 0.0),
@@ -646,6 +769,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut changed = app.pet.tick(now);
                 if app.pet.walk_dir() != 0 {
                     app.apply_walk(now);
+                    changed = true;
+                }
+                // Agent replies arriving from the worker thread.
+                while let Ok(agent::Msg::Reply(r)) = app.agent_rx.try_recv() {
+                    match r {
+                        Ok(text) => {
+                            let (speech, dir) = agent::parse_stage(&text);
+                            match dir.as_deref() {
+                                Some("next") => app.pet.next_scene(),
+                                Some(name) => {
+                                    app.pet.play_named(name);
+                                }
+                                None => {}
+                            }
+                            app.speak(&speech);
+                        }
+                        Err(e) => app.speak(&format!("Ugh, {e}")),
+                    }
+                    changed = true;
+                }
+                // Question handed over by the forked Ask window?
+                if let Some(mt) = ask_mtime() {
+                    if app.ask_mtime != Some(mt) {
+                        app.ask_mtime = Some(mt);
+                        let q = std::fs::read_to_string(ask_path()).unwrap_or_default();
+                        let _ = std::fs::write(ask_path(), "");
+                        let q = q.trim().to_string();
+                        if !q.is_empty() && app.agent.enabled() {
+                            app.speak("Hmm, let me think…");
+                            agent::send(app.agent.clone(), q, app.agent_tx.clone());
+                        }
+                        changed = true;
+                    }
+                }
+                // Settings child saved new agent config? Reload.
+                if let Some(mt) = cfg_mtime() {
+                    if app.cfg_mtime != Some(mt) {
+                        app.cfg_mtime = Some(mt);
+                        let c = load_config();
+                        app.agent.endpoint = c.agent_endpoint;
+                        app.agent.key = c.agent_key;
+                        app.agent.model = c.agent_model;
+                    }
+                }
+                // Bubble expiry needs one final redraw to clear.
+                if app.bubble.is_some() {
                     changed = true;
                 }
                 if changed || app.about_until.is_some() {

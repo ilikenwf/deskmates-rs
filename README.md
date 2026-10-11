@@ -56,10 +56,31 @@ assets/characters/tahni/
 cargo run --release          # expects ./assets next to the binary or in cwd
 ```
 
-Right-click: Touch her / Next scene / Hide / About / Quit. Left-drag moves her.
-She walks along the bottom edge of the screen between scenes.
+Right-click: Touch her / Ask Tahni… / Next scene / Settings… / Hide / About /
+Quit. Left-drag moves her. She walks along the bottom edge of the screen
+between scenes. `--character fatb` runs the FatB mascot instead of Tahni.
 `--matte` draws an opaque background (useful over remote desktops without a
 compositor). On Linux a compositor is required for true transparency.
+
+## Optional: chat with an AI (off by default)
+
+Right-click → **Settings…** points Tahni at any OpenAI-compatible
+`/chat/completions` endpoint (OpenAI, Ollama, LM Studio, …). Until you do,
+the app performs **zero network activity** — a request only ever fires from
+the "Ask Tahni…" menu item, and only when an endpoint is configured.
+
+```sh
+DESKMATES_AGENT_ENDPOINT=http://localhost:11434/v1 \
+DESKMATES_AGENT_KEY=sk-... \
+cargo run --release
+```
+
+Replies appear in a speech bubble; the model may embed a stage direction
+(`[anim:karate]`, `[anim:tahni_tease]`, …) which plays that animation while
+she "speaks". Settings persist in the config file (`agent_endpoint`,
+`agent_key`, `agent_model`). The chat client lives behind the `agent` cargo
+feature (default on); `--no-default-features` builds a strictly-offline pet
+and is what cross-target checks use (ring cannot cross-compile from Linux).
 
 ## Provenance & license
 
@@ -71,5 +92,8 @@ the `assets/` tree. Engine code in `src/` and `analysis/` is MIT.
 ## Status
 
 - [x] Tahni (2D) — 114 scenes, walking, touch reactions, tray, zoom
-- [ ] Other 2D DeskMates (Maeka, Kahli, Tavia, Arianna, Dancers, Sirens, FatB)
-- [ ] 3D characters (Tahni3D, Kahli3D) — needs a 3D renderer path
+- [x] FatB (2D) — 30 scenes (`--character fatb`)
+- [x] Optional OpenAI-compatible chat ("Ask Tahni…", off by default)
+- [ ] Other 2D DeskMates (Maeka, Kahli, Tavia, Arianna, Dancers, Sirens) —
+      newer installer container, RE in progress
+- [ ] 3D characters (Tahni3D, Kahli3D) — separate repo, needs a 3D renderer
