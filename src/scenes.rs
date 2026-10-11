@@ -33,11 +33,25 @@ fn one() -> u32 {
     1
 }
 
+/// Behavior script names loaded from `behaviors/` (see `load`).
+pub const BEHAVIOR_NAMES: &[&str] = &[
+    "common",
+    "common_demo",
+    "common_enter",
+    "common_enter_demo",
+    "touch",
+    "touch_demo",
+];
+
 #[derive(Debug, Deserialize)]
 pub struct Scene {
     pub name: String,
     pub entries: Vec<String>,
     pub defs: HashMap<String, Vec<Def>>,
+    /// Raw def bodies (before tokenizing) so weighted `{a|b%2}` choice
+    /// groups can be re-rolled every time the def plays.
+    #[serde(default)]
+    pub raw: HashMap<String, Vec<u8>>,
     /// Native frame size; 200x200 for classic FAZ, larger for 8bpp scenes.
     #[serde(default = "two_hundred")]
     pub w: u32,
@@ -64,6 +78,9 @@ pub struct Scenes {
     faz: HashMap<String, faz::Faz>,
     /// scene -> (frame id -> decoded RGBA), kept for the process lifetime.
     cache: Mutex<HashMap<(String, u32), Option<RgbaImage>>>,
+    /// Names loaded from `behaviors/` (common.FAS etc.): def sources, never
+    /// part of the random idle pool or the window-size vote.
+    pub behaviors: std::collections::HashSet<String>,
 }
 
 impl Scenes {
@@ -72,6 +89,9 @@ impl Scenes {
     pub fn frame_size(&self) -> (u32, u32) {
         let mut counts: std::collections::HashMap<(u32, u32), usize> = Default::default();
         for s in self.scenes.values() {
+            if self.behaviors.contains(&s.name) {
+                continue;
+            }
             *counts.entry((s.w, s.h)).or_default() += 1;
         }
         counts
@@ -118,6 +138,7 @@ impl Scenes {
                 entries.clear();
             }
             let mut defmap: HashMap<String, Vec<Def>> = HashMap::new();
+            let mut rawmap: HashMap<String, Vec<u8>> = HashMap::new();
             for (k, body) in defs {
                 let toks = faz::parse_reflist(&body);
                 let v = toks
@@ -129,16 +150,46 @@ impl Scenes {
                         faz::Tok::Name { name, rep } => Def { id: 0, x: 0, y: 0, rep, name },
                     })
                     .collect();
+                rawmap.insert(k.clone(), body);
                 defmap.insert(k, v);
             }
             let name = f.name.clone();
-            scenes.insert(name.clone(), Scene { name: name.clone(), entries, defs: defmap, w, h });
+            scenes.insert(name.clone(), Scene { name: name.clone(), entries, defs: defmap, raw: rawmap, w, h });
             fazs.insert(name, f);
+        }
+        // Behavior scripts (behaviors/*.fas.gz): the original common.FAS /
+        // common_enter.FAS / touch.FAS containers. They supply shared defs
+        // (blink, pause pools, enter sequences) and their own frames, but
+        // are never played as random scenes.
+        let mut behaviors = std::collections::HashSet::new();
+        let bdir = dir.join("behaviors");
+        for name in BEHAVIOR_NAMES {
+            let path = bdir.join(format!("{name}.fas.gz"));
+            let Ok(raw) = read_gunzip(&path) else { continue };
+            let Some(f) = faz::parse_faz(&raw) else { continue };
+            let Some((w, h)) = f.dims else { continue };
+            let (entries, defs) = faz::script_defs(&f);
+            let mut defmap: HashMap<String, Vec<Def>> = HashMap::new();
+            let mut rawmap: HashMap<String, Vec<u8>> = HashMap::new();
+            for (k, body) in defs {
+                let v = faz::parse_reflist(&body)
+                    .into_iter()
+                    .map(|t| match t {
+                        faz::Tok::Frame { id, x, y, rep } => Def { id, x, y, rep, name: String::new() },
+                        faz::Tok::Name { name, rep } => Def { id: 0, x: 0, y: 0, rep, name },
+                    })
+                    .collect();
+                rawmap.insert(k.clone(), body);
+                defmap.insert(k, v);
+            }
+            scenes.insert(name.to_string(), Scene { name: name.to_string(), entries, defs: defmap, raw: rawmap, w, h });
+            fazs.insert(name.to_string(), f);
+            behaviors.insert(name.to_string());
         }
         if scenes.is_empty() {
             return Err(format!("{}: no scenes parsed", sdir.display()));
         }
-        Ok(Scenes { dir: dir.to_path_buf(), scenes, faz: fazs, cache: Mutex::new(HashMap::new()) })
+        Ok(Scenes { dir: dir.to_path_buf(), scenes, faz: fazs, cache: Mutex::new(HashMap::new()), behaviors })
     }
 
     pub fn frame(&self, scene: &str, id: u32) -> Option<RgbaImage> {
@@ -146,7 +197,25 @@ impl Scenes {
         if let Some(hit) = self.cache.lock().get(&key) {
             return hit.clone();
         }
-        let img = self.faz.get(scene).and_then(|f| faz::decode_frame(f, id as u16));
+        let mut img = self.faz.get(scene).and_then(|f| faz::decode_frame(f, id as u16));
+        if img.is_none() {
+            // The original resolves frame tokens against a global frame
+            // table: current scene first, then the shared behavior files.
+            // That is how base poses (0000 stand, 0001/0002 blink, 0003
+            // wait — all in common_demo.FAS) resolve when a scene script
+            // references them without carrying its own copy.
+            for b in BEHAVIOR_NAMES {
+                if *b == scene {
+                    continue;
+                }
+                if let Some(f) = self.faz.get(*b) {
+                    if let Some(i2) = faz::decode_frame(f, id as u16) {
+                        img = Some(i2);
+                        break;
+                    }
+                }
+            }
+        }
         self.cache.lock().insert(key, img.clone());
         img
     }
@@ -168,13 +237,18 @@ impl Scenes {
     /// Drop cached frames of every other scene (bounds memory to roughly
     /// the active scene; reaction frames re-decode on demand).
     pub fn evict_except(&self, keep: &str) {
-        self.cache.lock().retain(|(s, _), _| s == keep);
+        self.cache
+            .lock()
+            .retain(|(s, _), _| s == keep || self.behaviors.contains(s));
     }
 
     /// All entry-point scene names across all scenes (idle pool).
     pub fn all_entries(&self) -> Vec<(String, String)> {
         let mut out = Vec::new();
         for s in self.scenes.values() {
+            if self.behaviors.contains(&s.name) {
+                continue;
+            }
             for e in &s.entries {
                 out.push((s.name.clone(), e.clone()));
             }

@@ -99,6 +99,16 @@ impl Pet {
             bag_at: 0,
         };
         pet.start_random();
+        // Original startup: play one weighted-random entry sequence from
+        // common_enter.FAS (`enter => {enter_clap|enter_hole|…}`) first.
+        if pet
+            .scenes
+            .scenes
+            .get("common_enter")
+            .map_or(false, |s| s.raw.contains_key("enter"))
+        {
+            pet.play("common_enter", "enter");
+        }
         pet
     }
 
@@ -218,13 +228,21 @@ impl Pet {
 
     fn steps_for(&self, scene: &str, name: &str) -> Option<Vec<Step>> {
         let sc: &Scene = self.scenes.scenes.get(scene)?;
-        let defs = sc.defs.get(name)?;
-        let mut steps = Vec::with_capacity(defs.len());
-        for d in defs {
-            if !d.name.is_empty() {
-                steps.push(Step::Sub { scene: scene.to_string(), name: d.name.clone(), rep: d.rep });
-            } else {
-                steps.push(Step::Frame { scene: scene.to_string(), id: d.id, x: d.x, y: d.y });
+        // Re-roll weighted `{a|b%2}` choice groups fresh on every play.
+        let body = sc.raw.get(name)?;
+        let body = crate::faz::resolve_choices(body, &mut rand::rng());
+        let toks = crate::faz::parse_reflist(&body);
+        let mut steps = Vec::with_capacity(toks.len());
+        for t in toks {
+            match t {
+                crate::faz::Tok::Name { name, rep } => {
+                    steps.push(Step::Sub { scene: scene.to_string(), name, rep })
+                }
+                crate::faz::Tok::Frame { id, x, y, rep } => {
+                    for _ in 0..rep.max(1) {
+                        steps.push(Step::Frame { scene: scene.to_string(), id, x, y });
+                    }
+                }
             }
         }
         Some(steps)
@@ -281,9 +299,6 @@ impl Pet {
                 Step::Sub { scene, name, rep } => {
                     self.frame_dur = frame_dur_for(self.speed);
                     match name.as_str() {
-                        "exit_wait" => { self.frame_dur = Duration::from_millis(900); return true; }
-                        "home_wait" => { self.frame_dur = Duration::from_millis(1600); return true; }
-                        "pause" => { self.frame_dur = Duration::from_millis(1200); return true; }
                         "all" => { self.speed = 1.0; continue; }
                         "all_slow" => { self.speed = 0.65; self.frame_dur = frame_dur_for(self.speed); continue; }
                         "all_fast" => { self.speed = 1.5; self.frame_dur = frame_dur_for(self.speed); continue; }
@@ -301,32 +316,52 @@ impl Pet {
                         self.frame_dur = Duration::from_millis(300);
                         return true;
                     }
-                    // unknown builtin (0003-style missing common list): hold
-                    if self.scenes.scenes.get(&scene).and_then(|s| s.defs.get(&name)).is_none() {
-                        self.frame_dur = Duration::from_millis(120);
-                        return true;
+                    // Resolve the def: the scene's own defs first, then the
+                    // shared common.FAS namespace (blink, pause pools, …).
+                    let mut scene = scene;
+                    let own = self
+                        .scenes
+                        .scenes
+                        .get(&scene)
+                        .map_or(false, |s| s.raw.contains_key(&name));
+                    if !own
+                        && self
+                            .scenes
+                            .scenes
+                            .get("common")
+                            .map_or(false, |s| s.raw.contains_key(&name))
+                    {
+                        scene = "common".to_string();
                     }
-                    if self.stack.len() >= MAX_DEPTH {
+                    if let Some(steps) = self.steps_for(&scene, &name) {
+                        if self.stack.len() >= MAX_DEPTH {
+                            continue;
+                        }
+                        let dir = if name.ends_with("_r") {
+                            1
+                        } else if name.ends_with("_l") {
+                            -1
+                        } else {
+                            0
+                        };
+                        if dir != 0 {
+                            self.walk_dir = dir;
+                        }
+                        let (rep_left, deadline) = if rep >= TIME_REP {
+                            (1, Some(now + Duration::from_millis(rep as u64)))
+                        } else {
+                            (rep.max(1), None)
+                        };
+                        self.stack.push(Level { steps, idx: 0, rep_left, deadline, dir });
                         continue;
                     }
-                    let Some(steps) = self.steps_for(&scene, &name) else { continue };
-                    let dir = if name.ends_with("_r") {
-                        1
-                    } else if name.ends_with("_l") {
-                        -1
-                    } else {
-                        0
-                    };
-                    if dir != 0 {
-                        self.walk_dir = dir;
+                    // No def anywhere: builtin wait or unknown-list hold.
+                    match name.as_str() {
+                        "exit_wait" => { self.frame_dur = Duration::from_millis(900); return true; }
+                        "home_wait" => { self.frame_dur = Duration::from_millis(1600); return true; }
+                        "pause" => { self.frame_dur = Duration::from_millis(1200); return true; }
+                        _ => { self.frame_dur = Duration::from_millis(120); return true; }
                     }
-                    let (rep_left, deadline) = if rep >= TIME_REP {
-                        (1, Some(now + Duration::from_millis(rep as u64)))
-                    } else {
-                        (rep.max(1), None)
-                    };
-                    self.stack.push(Level { steps, idx: 0, rep_left, deadline, dir });
-                    continue;
                 }
             }
         }

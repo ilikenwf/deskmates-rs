@@ -850,3 +850,96 @@ mod audit_tests {
         println!("{} strips", rows.len());
     }
 }
+
+#[cfg(test)]
+mod fas_probe {
+    use super::*;
+    #[test]
+    #[ignore]
+    fn parse_common_fas() {
+        let raw = std::fs::read("/tmp/tahni_fas_common.FAS").unwrap();
+        let f = parse_faz(&raw).expect("parse FAS");
+        println!("name={} frames={} dibs={} pairs={}", f.name, f.frames.len(), f.dibs.len(), f.pairs.len());
+        let (entry, defs) = script_defs(&f);
+        println!("entry={:?}", entry);
+        println!("defs={}", defs.len());
+        for (k, v) in defs.iter().take(12) {
+            println!("  {k} => {}", String::from_utf8_lossy(&v[..v.len().min(90)]));
+        }
+    }
+}
+
+/// Resolve `{a%2|b|c*3}` weighted-choice groups by rolling one branch
+/// (weight = `%N`, default 1). Shipped scripts contain no nested groups;
+/// a group with braces inside is left untouched.
+pub fn resolve_choices(s: &[u8], rng: &mut impl rand::Rng) -> Vec<u8> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut i = 0usize;
+    while i < s.len() {
+        if s[i] == b'{' {
+            if let Some(end) = s[i + 1..].iter().position(|&c| c == b'}') {
+                let group = &s[i + 1..i + 1 + end];
+                if !group.contains(&b'{') {
+                    let mut parts: Vec<&[u8]> = Vec::new();
+                    let mut start = 0usize;
+                    for (j, &c) in group.iter().enumerate() {
+                        if c == b'|' {
+                            parts.push(&group[start..j]);
+                            start = j + 1;
+                        }
+                    }
+                    parts.push(&group[start..]);
+                    // (weight, length-without-weight-suffix) per part
+                    let meta: Vec<(u32, usize)> = parts
+                        .iter()
+                        .map(|p| match p.iter().rposition(|&c| c == b'%') {
+                            Some(k) if k + 1 < p.len() && p[k + 1..].iter().all(|c| c.is_ascii_digit()) => {
+                                let w: u32 = std::str::from_utf8(&p[k + 1..])
+                                    .ok()
+                                    .and_then(|x| x.parse().ok())
+                                    .unwrap_or(1);
+                                (w.max(1), k)
+                            }
+                            _ => (1, p.len()),
+                        })
+                        .collect();
+                    let total: u32 = meta.iter().map(|(w, _)| *w).sum();
+                    let mut pick = rng.random_range(0..total);
+                    let mut idx = meta.len() - 1;
+                    for (k, (w, _)) in meta.iter().enumerate() {
+                        if pick < *w {
+                            idx = k;
+                            break;
+                        }
+                        pick -= *w;
+                    }
+                    out.extend_from_slice(&parts[idx][..meta[idx].1]);
+                    i = i + 1 + end + 1;
+                    continue;
+                }
+            }
+        }
+        out.push(s[i]);
+        i += 1;
+    }
+    out
+}
+
+#[cfg(test)]
+mod choice_tests {
+    use super::resolve_choices;
+    #[test]
+    fn weighted_choice_and_passthrough() {
+        let mut r = rand::rng();
+        // no braces: unchanged
+        assert_eq!(resolve_choices(b"0000,blink*2", &mut r), b"0000,blink*2");
+        // always the only branch, weight stripped
+        assert_eq!(resolve_choices(b"{solo%4}", &mut r), b"solo");
+        // deterministic single pick from two, weight suffix removed
+        let got = resolve_choices(b"x,{a|b%9999},y", &mut r);
+        assert!(got == b"x,a,y".to_vec() || got == b"x,b,y".to_vec(), "{got:?}");
+        // single-branch group: braces and weight stripped
+        assert_eq!(resolve_choices(b"{keep}", &mut r), b"keep");
+    }
+}
+
