@@ -145,10 +145,7 @@ fn assets_root() -> std::path::PathBuf {
 }
 
 /// All playable characters shipped under assets/characters/.
-const CHARACTERS: &[&str] = &[
-    "tahni", "fatb", "maeka", "kahli", "tavia", "sirens", "fantasy", "dm05",
-    "sns", "arianna", "dancers",
-];
+const CHARACTERS: &[&str] = &["tahni", "fatb", "maeka", "kahli"];
 
 fn display_name(character: &str) -> String {
     match character {
@@ -586,6 +583,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .cloned()
         .unwrap_or(cfg.character.clone());
     let display = display_name(&character);
+    // `--all`: one instance per character, fanned out along the bottom edge.
+    if args.iter().any(|a| a == "--all") {
+        if let Ok(exe) = std::env::current_exe() {
+            let mut i = 1i32;
+            for c in CHARACTERS {
+                if *c == character {
+                    continue;
+                }
+                let _ = std::process::Command::new(&exe)
+                    .arg("--character")
+                    .arg(c)
+                    .arg("--offset")
+                    .arg(i.to_string())
+                    .spawn();
+                i += 1;
+            }
+        }
+    }
+    let offset: i32 = args
+        .iter()
+        .position(|a| a == "--offset")
+        .and_then(|i| args.get(i + 1))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
 
     let root = assets_root();
     let sc = scenes::Scenes::load(&root.join("characters").join(&character))?;
@@ -713,7 +734,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Deskmates live at the bottom edge of the screen.
                 let pos = match (cfg.x, cfg.y) {
                     (Some(x), Some(y)) if x >= ax - ww && x <= ax + aw && y >= ay && y <= ay + ah => (x, y),
-                    _ => (ax + aw / 2 - ww / 2, ay + ah - wh),
+                    _ => ((ax + aw / 2 - ww / 2 + offset * (ww + 24)).min(ax + aw - ww), ay + ah - wh),
                 };
                 window.set_outer_position(Position::Physical(PhysicalPosition::new(pos.0, pos.1)));
                 app.walk_x = pos.0 as f64;

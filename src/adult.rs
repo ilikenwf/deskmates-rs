@@ -51,7 +51,7 @@ mod tests {
         // Every gated name must actually exist in its character's packed
         // scene set, otherwise the blocklist silently rots.
         let mut checked = 0;
-        for c in ["tahni", "maeka", "dancers", "sns"] {
+        for c in ["tahni", "maeka"] {
             let dir = format!(
                 "{}/assets/characters/{c}/scenes",
                 env!("CARGO_MANIFEST_DIR")
