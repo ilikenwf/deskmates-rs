@@ -29,7 +29,7 @@ use winit::window::{Icon, Window, WindowAttributes, WindowLevel};
 /// FAZ frame canvas; the window is exactly one frame.
 const WIN: u32 = 200;
 
-const ABOUT: &str = "DeskMates-rs v0.1\nTahni the Deskmate, safely reimplemented.\nNo phone-home. No unlock keys. No spyware.\n100% offline. Original animation art.\nClick her to make her react!";
+const ABOUT_FMT: &str = "DeskMates-rs v0.1\n{CHAR} the Deskmate, safely reimplemented.\nNo phone-home. No unlock keys. No spyware.\n100% offline. Original animation art.\nClick her to make her react!";
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
@@ -37,11 +37,12 @@ pub struct Config {
     pub scale: f64,
     pub x: Option<i32>,
     pub y: Option<i32>,
+    pub character: String,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { scale: 1.0, x: None, y: None }
+        Config { scale: 1.0, x: None, y: None, character: "tahni".into() }
     }
 }
 
@@ -73,9 +74,9 @@ fn load_config() -> Config {
     cfg
 }
 
-fn save_state(window: Option<&Window>, scale: f64) {
+fn save_state(window: Option<&Window>, scale: f64, character: &str) {
     let pos = window.and_then(|w| w.outer_position().ok());
-    let cfg = Config { scale: scale.clamp(0.5, 4.0), x: pos.map(|p| p.x), y: pos.map(|p| p.y) };
+    let cfg = Config { scale: scale.clamp(0.5, 4.0), x: pos.map(|p| p.x), y: pos.map(|p| p.y), character: character.into() };
     if let Some(p) = config_path() {
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -98,7 +99,7 @@ fn assets_root() -> std::path::PathBuf {
     std::path::PathBuf::from("assets")
 }
 
-fn make_tray() -> Option<tray_icon::TrayIcon> {
+fn make_tray(display: &str) -> Option<tray_icon::TrayIcon> {
     use tray_icon::menu::{Menu, MenuItem};
     use tray_icon::TrayIconBuilder;
     #[cfg(target_os = "linux")]
@@ -117,7 +118,7 @@ fn make_tray() -> Option<tray_icon::TrayIcon> {
     TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
-        .with_tooltip("Tahni the Deskmate")
+        .with_tooltip(format!("{display} the Deskmate"))
         .with_icon(icon)
         .build()
         .ok()
@@ -141,6 +142,8 @@ struct App {
     font: FontArc,
     scale: f64,
     matte: bool,
+    character: String,
+    display: String,
     pixels: Option<pixels::Pixels<'static>>,
     window: Option<Arc<Window>>,
     size: (u32, u32),
@@ -239,7 +242,8 @@ impl App {
                 let scale = PxScale::from(10.5 * s);
                 let lh = line_height(&self.font, scale);
                 let mut y = 4.0 + lh;
-                for line in ABOUT.lines() {
+                let about = ABOUT_FMT.replace("{CHAR}", &self.display);
+                for line in about.lines() {
                     for sub in wrap(&self.font, line, (bw - 12) as f32, scale) {
                         draw_text(&mut canvas, w, h, &self.font, &sub, 10.0, y, scale, [20, 20, 25, 255]);
                         y += lh;
@@ -403,9 +407,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let matte = args.iter().any(|a| a == "--matte");
     let cfg = load_config();
+    let character = args
+        .iter()
+        .position(|a| a == "--character")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .unwrap_or(cfg.character.clone());
+    let display = match character.as_str() {
+        "fatb" => "FatB".to_string(),
+        other => {
+            let mut c = other.chars();
+            match c.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                None => other.to_string(),
+            }
+        }
+    };
 
     let root = assets_root();
-    let sc = scenes::Scenes::load(&root.join("characters").join("tahni"))?;
+    let sc = scenes::Scenes::load(&root.join("characters").join(&character))?;
     let sc = Arc::new(sc);
     let font = FontArc::try_from_vec(std::fs::read(root.join("fonts/LiberationSans-Regular.ttf"))?)?;
     let pet = Pet::new(sc.clone());
@@ -416,6 +436,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         font,
         scale: cfg.scale,
         matte,
+        character,
+        display,
         pixels: None,
         window: None,
         size: (1, 1),
@@ -462,7 +484,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Event::Resumed if app.window.is_none() => {
                 #[cfg_attr(not(windows), allow(unused_mut))]
                 let mut attrs = WindowAttributes::default()
-                    .with_title("Tahni the Deskmate")
+                    .with_title(format!("{} the Deskmate", app.display))
                     .with_decorations(false)
                     .with_transparent(!matte)
                     .with_resizable(false)
@@ -512,7 +534,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = window.set_window_icon(Icon::from_rgba(img.into_raw(), iw, ih).ok());
                 }
                 if app.tray.is_none() {
-                    app.tray = make_tray();
+                    app.tray = make_tray(&app.display);
                     if app.tray.is_none() {
                         eprintln!("note: system tray unavailable (Linux: install libappindicator)");
                     }
@@ -561,7 +583,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let next = (app.scale * (1.0 + 0.1 * dy.signum())).clamp(0.5, 4.0);
                         if (next - app.scale).abs() > f64::EPSILON {
                             app.scale = next;
-                            save_state(app.window.as_deref(), next);
+                            save_state(app.window.as_deref(), next, &app.character);
                             if let Some(w) = &app.window {
                                 let _ = w.request_inner_size(LogicalSize::new(app.win_logical() as f64, app.win_logical() as f64));
                             }
@@ -604,7 +626,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         } else {
-                            save_state(app.window.as_deref(), app.scale);
+                            save_state(app.window.as_deref(), app.scale, &app.character);
                         }
                     }
                 }

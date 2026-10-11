@@ -94,6 +94,8 @@ def main():
             continue
         if not r['frames'] and not r['pairs']:
             continue
+        if r['palette'] is None:
+            continue  # no DIB template: not a scene file
         name = r['name']
         if not name.isascii() or not re.match(r'^[A-Za-z][\w]*$', name):
             continue
