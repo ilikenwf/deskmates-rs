@@ -13,6 +13,7 @@
 //! This binary contains zero network code. All content is local, all scenes
 //! are unlocked.
 
+mod adult;
 mod agent;
 mod ask_ui;
 mod faz;
@@ -41,11 +42,13 @@ pub struct Config {
     pub agent_endpoint: String,
     pub agent_key: String,
     pub agent_model: String,
+    /// Show adults-only (nudity) scenes; hidden from all random pools unless true.
+    pub adult: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { scale: 1.0, x: None, y: None, character: "tahni".into(), agent_endpoint: String::new(), agent_key: String::new(), agent_model: String::new() }
+        Config { scale: 1.0, x: None, y: None, character: "tahni".into(), agent_endpoint: String::new(), agent_key: String::new(), agent_model: String::new(), adult: false }
     }
 }
 
@@ -529,7 +532,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (fw0, fh0) = sc.frame_size();
     let sc = Arc::new(sc);
     let font = FontArc::try_from_vec(std::fs::read(root.join("fonts/LiberationSans-Regular.ttf"))?)?;
-    let pet = Pet::new(sc.clone());
+    let pet = Pet::new(sc.clone(), cfg.adult);
     let mut agent_cfg = agent::AgentCfg {
         endpoint: cfg.agent_endpoint.clone(),
         key: cfg.agent_key.clone(),
@@ -814,6 +817,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         app.agent.endpoint = c.agent_endpoint;
                         app.agent.key = c.agent_key;
                         app.agent.model = c.agent_model;
+                        app.pet.set_adult(c.adult);
                     }
                 }
                 // Bubble expiry needs one final redraw to clear.

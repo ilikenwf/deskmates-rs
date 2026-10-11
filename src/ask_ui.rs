@@ -21,7 +21,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes};
 
 const W: u32 = 460;
-const H: u32 = 240;
+const H: u32 = 270;
 const FIELDS: [&str; 3] = ["API endpoint (blank = offline)", "API key", "Model"];
 
 struct Ui {
@@ -38,6 +38,9 @@ struct Ui {
     mouse_pos: (f64, f64),
     /// Ask mode: one question field + Ask button (writes the ask file).
     ask: bool,
+    /// Settings mode: adults-only content checkbox.
+    adult: bool,
+    adult_rect: (i32, i32, i32, i32),
 }
 
 impl Ui {
@@ -92,6 +95,7 @@ impl Ui {
         cfg.agent_endpoint = self.fields[0].trim().to_string();
         cfg.agent_key = self.fields[1].trim().to_string();
         cfg.agent_model = self.fields[2].trim().to_string();
+        cfg.adult = self.adult;
         crate::save_config(&cfg);
         self.status = "Saved. Tahni reloads this automatically.".to_string();
     }
@@ -101,6 +105,13 @@ impl Ui {
             if x >= *rx as f64 && x < (rx + rw) as f64 && y >= *ry as f64 && y < (ry + rh) as f64 {
                 self.sel = i;
                 self.caret = self.fields[i].chars().count();
+                return;
+            }
+        }
+        if !self.ask {
+            let (rx, ry, rw, rh) = self.adult_rect;
+            if x >= rx as f64 && x < (rx + rw) as f64 && y >= ry as f64 && y < (ry + rh) as f64 {
+                self.adult = !self.adult;
                 return;
             }
         }
@@ -162,6 +173,19 @@ impl Ui {
             self.rects.push((bx, by, bw, bh));
             y += lh * 1.35;
         }
+        if !self.ask {
+            let bs = (lh * 1.1) as i32;
+            let (bx, by) = ((14.0 * s) as i32, (y - lh * 0.35) as i32);
+            self.adult_rect = (bx, by - 4, (w as f32 - 28.0 * s) as i32, bs + 8);
+            fill_rect(&mut canvas, w, h, bx, by, bs, bs, [0xFF, 0xFF, 0xFF, 255]);
+            stroke_rect(&mut canvas, w, h, bx, by, bs, bs, [0x99, 0x99, 0x99, 255]);
+            if self.adult {
+                let q = bs / 4;
+                fill_rect(&mut canvas, w, h, bx + q, by + q, q * 2 + 1, q * 2 + 1, [0xB0, 0x30, 0x60, 255]);
+            }
+            draw_text(&mut canvas, w, h, &self.font, "Show adults-only scenes (nudity)", (bx + bs) as f32 + 8.0 * s, by as f32 + bs as f32 * 0.78, scale, [0x33, 0x33, 0x33, 255]);
+            y += lh * 1.7;
+        }
         // Save / Ask button.
         let (bx, by, bw, bh) = ((14.0 * s) as i32, y as i32, (110.0 * s) as i32, (lh * 1.7) as i32);
         fill_rect(&mut canvas, w, h, bx, by, bw, bh, [0xF8, 0xE0, 0xE8, 255]);
@@ -203,14 +227,16 @@ impl Ui {
 pub fn run(ask: bool) -> Result<(), Box<dyn std::error::Error>> {
     let el = EventLoop::new()?;
     let font = FontArc::try_from_vec(std::fs::read(assets_root().join("fonts/LiberationSans-Regular.ttf"))?)?;
+    let cfg = if ask { crate::Config::default() } else { crate::load_config() };
     let mut ui = Ui {
         font,
         fields: if ask {
             [String::new(), String::new(), String::new()]
         } else {
-            let c = crate::load_config();
-            [c.agent_endpoint, c.agent_key, c.agent_model]
+            [cfg.agent_endpoint, cfg.agent_key, cfg.agent_model]
         },
+        adult: cfg.adult,
+        adult_rect: (0, 0, 0, 0),
         sel: 0,
         caret: 0,
         window: None,

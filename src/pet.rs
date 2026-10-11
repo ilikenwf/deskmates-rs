@@ -72,8 +72,8 @@ fn frame_dur_for(speed: f64) -> Duration {
 }
 
 impl Pet {
-    pub fn new(scenes: Arc<Scenes>) -> Pet {
-        let entries = scenes.all_entries();
+    pub fn new(scenes: Arc<Scenes>, adult: bool) -> Pet {
+        let entries = Self::pool(&scenes, adult);
         let reactions = REACTIONS
             .iter()
             .filter_map(|r| {
@@ -94,6 +94,20 @@ impl Pet {
         };
         pet.start_random();
         pet
+    }
+
+    /// Random-pool of entry scenes minus adults-only ones unless enabled.
+    fn pool(scenes: &Scenes, adult: bool) -> Vec<(String, String)> {
+        scenes
+            .all_entries()
+            .into_iter()
+            .filter(|(s, _)| adult || !crate::adult::is_adult(s))
+            .collect()
+    }
+
+    /// Toggle adults-only scenes; takes effect from the next scene onward.
+    pub fn set_adult(&mut self, adult: bool) {
+        self.entries = Self::pool(&self.scenes, adult);
     }
 
     pub fn sprite(&self) -> Option<&Sprite> {

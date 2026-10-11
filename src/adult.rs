@@ -48,25 +48,20 @@ mod tests {
 
     #[test]
     fn gated_scenes_exist_in_shipped_assets() {
-        // Every gated name must actually exist in its character's scenes.json,
-        // otherwise the blocklist silently rots after asset regeneration.
+        // Every gated name must actually exist in its character's packed
+        // scene set, otherwise the blocklist silently rots.
         let mut checked = 0;
         for c in ["tahni", "maeka", "dancers", "sns"] {
-            let path = format!(
-                "{}/assets/characters/{c}/scenes.json",
+            let dir = format!(
+                "{}/assets/characters/{c}/scenes",
                 env!("CARGO_MANIFEST_DIR")
             );
-            let raw = match std::fs::read(&path) {
-                Ok(r) => r,
-                Err(_) => continue, // packed-assets layout may lack scenes.json
-            };
-            let v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
             for s in ADULT_SCENES {
-                if v.get(*s).is_some() {
+                if std::path::Path::new(&format!("{dir}/{s}.bin.gz")).exists() {
                     checked += 1;
                 }
             }
         }
-        assert!(checked >= ADULT_SCENES.len(), "only {checked}/{} gated scenes found", ADULT_SCENES.len());
+        assert_eq!(checked, ADULT_SCENES.len(), "some gated scenes missing from assets");
     }
 }
