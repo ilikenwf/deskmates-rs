@@ -10,7 +10,7 @@ use crate::scenes::{Scene, Scenes};
 use rand::Rng;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use rand::seq::IndexedRandom;
+use rand::seq::{IndexedRandom, SliceRandom};
 
 const TIME_REP: u32 = 1000;
 const MAX_DEPTH: usize = 24;
@@ -57,6 +57,10 @@ pub struct Pet {
     /// Idle gap: when to start the next random scene.
     next_at: Option<Instant>,
     speed: f64,
+    /// Shuffle-bag over `entries`: every scene plays once per bag before
+    /// any repeats (fixes "always the same three scenes").
+    bag: Vec<usize>,
+    bag_at: usize,
 }
 
 /// Scenes that read as touch reactions (the stripped touch.FAS mapped
@@ -91,6 +95,8 @@ impl Pet {
             walk_dir: 0,
             next_at: None,
             speed: 1.0,
+            bag: Vec::new(),
+            bag_at: 0,
         };
         pet.start_random();
         pet
@@ -108,10 +114,21 @@ impl Pet {
     /// Toggle adults-only scenes; takes effect from the next scene onward.
     pub fn set_adult(&mut self, adult: bool) {
         self.entries = Self::pool(&self.scenes, adult);
+        self.bag.clear();
+        self.bag_at = 0;
     }
 
     pub fn sprite(&self) -> Option<&Sprite> {
         self.cur.as_ref()
+    }
+
+    /// Scene the current sprite belongs to (for preload scheduling).
+    pub fn cur_scene(&self) -> Option<String> {
+        self.cur.as_ref().map(|s| s.scene.clone())
+    }
+
+    pub fn scenes_arc(&self) -> Arc<Scenes> {
+        self.scenes.clone()
     }
 
     pub fn walk_dir(&self) -> i8 {
@@ -173,7 +190,16 @@ impl Pet {
     }
 
     fn start_random(&mut self) {
-        if let Some((scene, entry)) = self.entries.choose(&mut rand::rng()).cloned() {
+        if self.entries.is_empty() {
+            return;
+        }
+        if self.bag_at >= self.bag.len() {
+            self.bag = (0..self.entries.len()).collect();
+            self.bag.shuffle(&mut rand::rng());
+            self.bag_at = 0;
+        }
+        if let Some((scene, entry)) = self.entries.get(self.bag[self.bag_at]).cloned() {
+            self.bag_at += 1;
             self.play(&scene, &entry);
         }
     }

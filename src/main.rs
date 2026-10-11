@@ -144,8 +144,29 @@ fn assets_root() -> std::path::PathBuf {
     std::path::PathBuf::from("assets")
 }
 
+/// All playable characters shipped under assets/characters/.
+const CHARACTERS: &[&str] = &[
+    "tahni", "fatb", "maeka", "kahli", "tavia", "sirens", "fantasy", "dm05",
+    "sns", "arianna", "dancers",
+];
+
+fn display_name(character: &str) -> String {
+    match character {
+        "fatb" => "FatB".to_string(),
+        "dm05" => "DM05".to_string(),
+        "sns" => "SnS".to_string(),
+        other => {
+            let mut c = other.chars();
+            match c.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                None => other.to_string(),
+            }
+        }
+    }
+}
+
 fn make_tray(display: &str) -> Option<tray_icon::TrayIcon> {
-    use tray_icon::menu::{Menu, MenuItem};
+    use tray_icon::menu::{Menu, MenuItem, Submenu};
     use tray_icon::TrayIconBuilder;
     #[cfg(target_os = "linux")]
     {
@@ -158,8 +179,13 @@ fn make_tray(display: &str) -> Option<tray_icon::TrayIcon> {
     let icon = tray_icon::Icon::from_rgba(img.into_raw(), tw, th).ok()?;
     let menu = Menu::new();
     let toggle = MenuItem::with_id("toggle", "Show / Hide", true, None);
+    let chars = Submenu::new("Character", true);
+    for c in CHARACTERS {
+        let item = MenuItem::with_id(format!("char:{c}"), display_name(c), true, None);
+        chars.append_items(&[&item]).ok();
+    }
     let quit = MenuItem::with_id("quit", "Quit", true, None);
-    menu.append_items(&[&toggle, &quit]).ok()?;
+    menu.append_items(&[&toggle, &chars, &quit]).ok()?;
     TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
@@ -177,6 +203,7 @@ const MENU: &[MenuItem] = &[
     MenuItem { label: "Touch her" },
     MenuItem { label: "Ask Tahni…" },
     MenuItem { label: "Next scene" },
+    MenuItem { label: "Next character" },
     MenuItem { label: "Settings…" },
     MenuItem { label: "Hide" },
     MenuItem { label: "About" },
@@ -212,11 +239,45 @@ struct App {
     last_move: Instant,
     /// Fractional window x for smooth walking.
     walk_x: f64,
+    /// Last scene whose frames were pre-decoded (jank-free playback).
+    preloaded: String,
 }
 
 impl App {
     fn win_logical(&self) -> (u32, u32) {
         ((self.fw as f64 * self.scale) as u32, (self.fh as f64 * self.scale) as u32)
+    }
+
+    /// Hot-swap the playable character: reload scenes, rebuild pet, resize
+    /// the window, persist choice, refresh tray tooltip.
+    fn switch_character(&mut self, name: &str) {
+        if name == self.character || !CHARACTERS.contains(&name) {
+            return;
+        }
+        let Ok(sc) = scenes::Scenes::load(
+            &assets_root().join("characters").join(name),
+        ) else {
+            return;
+        };
+        let (fw, fh) = sc.frame_size();
+        self.scenes = Arc::new(sc);
+        self.fw = fw;
+        self.fh = fh;
+        self.character = name.to_string();
+        self.display = display_name(name);
+        self.pet = Pet::new(self.scenes.clone(), load_config().adult);
+        self.preloaded = String::new();
+        self.bubble = None;
+        self.menu_open = false;
+        if let Some(w) = &self.window {
+            let (lw, lh) = self.win_logical();
+            let _ = w.request_inner_size(LogicalSize::new(lw as f64, lh as f64));
+            let _ = w.set_title(&format!("{} the Deskmate", self.display));
+            w.request_redraw();
+        }
+        save_state(self.window.as_deref(), self.scale, name);
+        self.tray = None;
+        self.tray = make_tray(&self.display);
     }
 
     /// Show text in the speech bubble for a duration scaled by length.
@@ -367,6 +428,14 @@ impl App {
                         }
                     }
                     "Next scene" => self.pet.next_scene(),
+                    "Next character" => {
+                        let next = CHARACTERS
+                            .iter()
+                            .position(|c| *c == self.character)
+                            .map(|i| CHARACTERS[(i + 1) % CHARACTERS.len()])
+                            .unwrap_or("tahni");
+                        self.switch_character(next);
+                    }
                     "Settings…" => fork_child("--settings-ui"),
                     "Hide" => {
                         if let Some(w) = &self.window {
@@ -516,16 +585,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|i| args.get(i + 1))
         .cloned()
         .unwrap_or(cfg.character.clone());
-    let display = match character.as_str() {
-        "fatb" => "FatB".to_string(),
-        other => {
-            let mut c = other.chars();
-            match c.next() {
-                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-                None => other.to_string(),
-            }
-        }
-    };
+    let display = display_name(&character);
 
     let root = assets_root();
     let sc = scenes::Scenes::load(&root.join("characters").join(&character))?;
@@ -578,6 +638,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tray: None,
         last_move: Instant::now(),
         walk_x: 0.0,
+        preloaded: String::new(),
     };
 
     let el = EventLoop::new()?;
@@ -604,6 +665,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
+                ref id if id.starts_with("char:") => app.switch_character(&id[5..]),
                 _ => {}
             }
         }
@@ -772,10 +834,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Event::UserEvent(_) => {}
             Event::AboutToWait => {
                 let now = Instant::now();
-                let mut changed = app.pet.tick(now);
-                if app.pet.walk_dir() != 0 {
+                // While the menu is open the pet must not walk or change
+                // scenes: the menu is painted inside the pet window, and a
+                // moving/resizing window makes menu clicks miss.
+                let mut changed = if app.menu_open { false } else { app.pet.tick(now) };
+                if !app.menu_open && app.pet.walk_dir() != 0 {
                     app.apply_walk(now);
                     changed = true;
+                }
+                // Pre-decode the whole current scene off-thread, then drop
+                // other scenes' frames: playback never decodes mid-frame
+                // and memory stays bounded to the active scene.
+                if let Some(s) = app.pet.cur_scene() {
+                    if s != app.preloaded {
+                        app.preloaded = s.clone();
+                        let sc = app.pet.scenes_arc();
+                        std::thread::spawn(move || {
+                            sc.preload(&s);
+                            sc.evict_except(&s);
+                        });
+                    }
                 }
                 // Agent replies arriving from the worker thread.
                 while let Ok(agent::Msg::Reply(r)) = app.agent_rx.try_recv() {

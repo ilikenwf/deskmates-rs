@@ -151,6 +151,26 @@ impl Scenes {
         img
     }
 
+    /// Decode every frame of `scene` into the cache (called from a helper
+    /// thread when a scene starts, so playback never decodes mid-frame).
+    pub fn preload(&self, scene: &str) {
+        let Some(f) = self.faz.get(scene) else { return };
+        for id in f.frames.keys() {
+            let key = (scene.to_string(), *id as u32);
+            if self.cache.lock().contains_key(&key) {
+                continue;
+            }
+            let img = faz::decode_frame(f, *id);
+            self.cache.lock().insert(key, img);
+        }
+    }
+
+    /// Drop cached frames of every other scene (bounds memory to roughly
+    /// the active scene; reaction frames re-decode on demand).
+    pub fn evict_except(&self, keep: &str) {
+        self.cache.lock().retain(|(s, _), _| s == keep);
+    }
+
     /// All entry-point scene names across all scenes (idle pool).
     pub fn all_entries(&self) -> Vec<(String, String)> {
         let mut out = Vec::new();

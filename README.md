@@ -67,11 +67,15 @@ python3 analysis/pack_assets.py            # all characters
 python3 analysis/pack_assets.py tahni      # or just one
 ```
 
-Right-click: Touch her / Ask Tahni… / Next scene / Settings… / Hide / About /
-Quit. Left-drag moves her. She walks along the bottom edge of the screen
-between scenes. `--character fatb` runs the FatB mascot instead of Tahni.
-`--matte` draws an opaque background (useful over remote desktops without a
-compositor). On Linux a compositor is required for true transparency.
+Right-click: Touch her / Ask Tahni… / Next scene / Next character /
+Settings… / Hide / About / Quit. Left-drag moves her. She walks along the
+bottom edge of the screen between scenes. The tray icon's **Character**
+submenu (or "Next character") hot-swaps between all 11 shipped characters:
+Tahni, FatB, Maeka, Kahli, Tavia, Sirens, Fantasy, DM05, SnS, Arianna,
+Dancers — the choice persists in the config. `--character <name>` selects
+one at startup. `--matte` draws an opaque background (useful over remote
+desktops without a compositor). On Linux a compositor is required for true
+transparency.
 
 ## Optional: chat with an AI (off by default)
 
@@ -102,9 +106,12 @@ the `assets/` tree. Engine code in `src/` and `analysis/` is MIT.
 
 ## Status
 
-- [x] Tahni (2D) — 114 scenes, walking, touch reactions, tray, zoom
-- [x] FatB (2D) — 30 scenes (`--character fatb`)
+- [x] All 11 2D characters (Tahni 114 scenes … Dancers 49) — walking,
+      touch reactions, tray + in-app character switcher, zoom, shuffle-bag
+      scene order (every scene plays before any repeats)
 - [x] Optional OpenAI-compatible chat ("Ask Tahni…", off by default)
-- [ ] Other 2D DeskMates (Maeka, Kahli, Tavia, Arianna, Dancers, Sirens) —
-      newer installer container, RE in progress
-- [ ] 3D characters (Tahni3D, Kahli3D) — separate repo, needs a 3D renderer
+- [x] Adults-only scene gate (Settings checkbox, default off)
+- [x] Original FAZ assets loaded natively (`.bin.gz`, no PNG dumps)
+- [x] 3D characters (Tahni3D, Kahli3D) — see `deskmates3d-rs`
+- The original payload contains no audio files (verified against the
+      installer manifest), so the pet is silent by design.
