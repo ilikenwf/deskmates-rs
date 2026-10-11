@@ -9,7 +9,7 @@
 //! The pet notices either via mtime polling and reloads.
 
 use crate::assets_root;
-use crate::{draw_text, fill_rect, line_height, stroke_rect, wrap};
+use crate::{draw_text, fill_rect, line_height, stroke_rect};
 use ab_glyph::FontArc;
 use ab_glyph::PxScale;
 use std::sync::Arc;

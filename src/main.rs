@@ -30,6 +30,8 @@ use winit::dpi::{LogicalSize, PhysicalPosition, Position};
 use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Icon, Window, WindowAttributes, WindowLevel};
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+use winit::window::CursorGrabMode;
 
 const ABOUT_FMT: &str = "DeskMates-rs v0.1\n{CHAR} the Deskmate, safely reimplemented.\nNo phone-home. No unlock keys. No spyware.\n100% offline. Original animation art.\nClick her to make her react!";
 
@@ -133,6 +135,167 @@ fn save_state(window: Option<&Window>, scale: f64, character: &str) {
     }
 }
 
+/// X11: clip the window to the opaque pixels of the sprite (bounding +
+/// input shape) so the desktop shows through transparent areas even when no
+/// compositor is running, and clicks on empty areas fall through to it.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+mod xshape {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::shape::{ConnectionExt as ShapeExt, SK, SO};
+    use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as XprotoExt, CreateGCAux, ImageFormat};
+    use x11rb::rust_connection::RustConnection;
+
+    /// Persistent X connection dedicated to applying window shapes. winit
+    /// 0.30 does not expose the XID, so the window is found by WM_CLASS.
+    pub struct Shaper {
+        conn: Option<(RustConnection, usize)>,
+        class: String,
+        window: Option<u32>,
+        since_resolve: u32,
+    }
+
+    impl Shaper {
+        pub fn new() -> Shaper {
+            Shaper {
+                conn: x11rb::connect(None).ok(),
+                class: std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.file_name().map(|s| s.to_string_lossy().into_owned()))
+                    .unwrap_or_default(),
+                window: None,
+                since_resolve: 0,
+            }
+        }
+
+        /// Locate our top-level window by WM_CLASS instance name.
+        fn resolve(&mut self) {
+            self.window = None;
+            self.since_resolve = 0;
+            let Some((conn, screen)) = &self.conn else { return };
+            let root = conn.setup().roots[*screen].root;
+            let tree = conn
+                .query_tree(root)
+                .ok()
+                .and_then(|c| c.reply().ok());
+            let Some(tree) = tree else { return };
+            for win in tree.children {
+                let prop = conn
+                    .get_property(false, win, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 64)
+                    .ok()
+                    .and_then(|c| c.reply().ok());
+                let Some(prop) = prop else { continue };
+                let instance: Vec<u8> = prop
+                    .value
+                    .iter()
+                    .copied()
+                    .take_while(|&c| c != 0)
+                    .collect();
+                if instance == self.class.as_bytes() {
+                    // The tray-icon crate keeps a hidden 1x1 window with the
+                    // same WM_CLASS; the pet is the only one with real size.
+                    let big = conn
+                        .get_geometry(win)
+                        .ok()
+                        .and_then(|c| c.reply().ok())
+                        .map_or(false, |g| g.width >= 32 && g.height >= 32);
+                    if big {
+                        self.window = Some(win);
+                        return;
+                    }
+                }
+            }
+        }
+
+        /// Grab the pointer without confinement so motion events keep
+        /// arriving while the cursor is outside the tiny window (drag).
+        /// owner_events=true keeps delivering them to winit's selections.
+        pub fn grab(&mut self) {
+            if self.window.is_none() {
+                self.resolve();
+            }
+            let (Some((conn, _)), Some(win)) = (self.conn.as_ref(), self.window) else {
+                return;
+            };
+            use x11rb::protocol::xproto::{EventMask, GrabMode};
+            let mask = EventMask::BUTTON_PRESS
+                | EventMask::BUTTON_RELEASE
+                | EventMask::POINTER_MOTION
+                | EventMask::BUTTON1_MOTION;
+            let _ = conn.grab_pointer(
+                true,
+                win,
+                mask,
+                GrabMode::ASYNC,
+                GrabMode::ASYNC,
+                0u32,
+                0u32,
+                x11rb::CURRENT_TIME,
+            );
+            let _ = conn.flush();
+        }
+
+        pub fn ungrab(&self) {
+            if let Some((conn, _)) = &self.conn {
+                let _ = conn.ungrab_pointer(x11rb::CURRENT_TIME);
+                let _ = conn.flush();
+            }
+        }
+        /// Clip the window (bounding + input) to the opaque pixels of the
+        /// straight-alpha RGBA `canvas` (stride 4, `w`x`h`).
+        pub fn apply(&mut self, w: u32, h: u32, canvas: &[u8]) {
+            self.since_resolve += 1;
+            if self.window.is_none() || self.since_resolve > 120 {
+                self.resolve();
+            }
+            let (Some((conn, _)), Some(win)) = (self.conn.as_ref(), self.window) else {
+                return;
+            };
+            if w == 0 || h == 0 || w > u16::MAX as u32 || h > u16::MAX as u32 {
+                return;
+            }
+            let (w16, h16) = (w as u16, h as u16);
+            // put_image XY_BITMAP rows are padded to 4 bytes.
+            let bpl = ((w as usize + 7) / 8 + 3) & !3;
+            let mut mask = vec![0u8; bpl * h as usize];
+            for y in 0..h as usize {
+                for x in 0..w as usize {
+                    if canvas[(y * w as usize + x) * 4 + 3] > 0 {
+                        mask[y * bpl + x / 8] |= 0x80 >> (x % 8);
+                    }
+                }
+            }
+            let Ok(pixmap) = conn.generate_id() else { return };
+            if conn.create_pixmap(1, pixmap, win, w16, h16).is_err() {
+                return;
+            }
+            let Ok(gc) = conn.generate_id() else {
+                let _ = conn.free_pixmap(pixmap);
+                return;
+            };
+            // XY_BITMAP put_image paints 1-bits with the GC foreground and
+            // 0-bits with the background: fg=1/bg=0 makes the pixmap == mask.
+            if conn
+                .create_gc(gc, pixmap, &CreateGCAux::new().foreground(1).background(0))
+                .is_err()
+            {
+                let _ = conn.free_pixmap(pixmap);
+                return;
+            }
+            if conn
+                .put_image(ImageFormat::XY_BITMAP, pixmap, gc, w16, h16, 0, 0, 0, 1, &mask)
+                .is_ok()
+            {
+                let _ = conn.shape_mask(SO::SET, SK::BOUNDING, win, 0, 0, pixmap);
+                let _ = conn.shape_mask(SO::SET, SK::INPUT, win, 0, 0, pixmap);
+            }
+            let _ = conn.free_gc(gc);
+            let _ = conn.free_pixmap(pixmap);
+            let _ = conn.flush();
+        }
+    }
+}
+
+
 fn assets_root() -> std::path::PathBuf {
     // ./assets next to the binary or in the cwd, like bonzibuddy-rs.
     let exe = std::env::current_exe().unwrap_or_default();
@@ -193,6 +356,16 @@ fn make_tray(display: &str) -> Option<tray_icon::TrayIcon> {
         .ok()
 }
 
+/// Left-button press state for drag-to-move: absolute-drag from the press
+/// point stalls once the pointer leaves the small window, so past the
+/// threshold we grab the pointer and move incrementally per event.
+struct Press {
+    start: (f64, f64),
+    last: (f64, f64),
+    win: (i32, i32),
+    dragging: bool,
+}
+
 struct MenuItem {
     label: &'static str,
 }
@@ -222,7 +395,7 @@ struct App {
     window: Option<Arc<Window>>,
     size: (u32, u32),
     mouse: (f64, f64),
-    press: Option<((f64, f64), (i32, i32))>,
+    press: Option<Press>,
     menu_open: bool,
     menu_rects: Vec<(usize, (i32, i32, i32, i32))>,
     about_until: Option<Instant>,
@@ -241,6 +414,13 @@ struct App {
     preloaded: String,
     /// Wave archive playback for ` !name` script tokens.
     audio: crate::audio::Audio,
+    /// X11 window shaper (transparent clipping); unused on other platforms.
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    shaper: xshape::Shaper,
+    /// Window auto-hidden during a blank inter-scene gap.
+    hidden_by_blank: bool,
+    /// Suppress auto-hide until this instant (user just chose Show).
+    blank_hide_after: Option<Instant>,
 }
 
 impl App {
@@ -276,8 +456,14 @@ impl App {
             w.request_redraw();
         }
         save_state(self.window.as_deref(), self.scale, name);
-        self.tray = None;
-        self.tray = make_tray(&self.display);
+        // Rebuilding the tray (drop + re-register) makes the icon vanish on
+        // Linux status-notifier buses; keep it and just update the tooltip.
+        match &self.tray {
+            Some(t) => {
+                let _ = t.set_tooltip(Some(format!("{} the Deskmate", self.display)));
+            }
+            None => self.tray = make_tray(&self.display),
+        }
     }
 
     /// Show text in the speech bubble for a duration scaled by length.
@@ -412,6 +598,13 @@ impl App {
             }
         }
         let _ = px.queue();
+        // Shape the window to the sprite: real transparency on bare X11.
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        {
+            if !self.matte {
+                self.shaper.apply(w, h, &canvas);
+            }
+        }
     }
 
     fn menu_click(&mut self, x: f64, y: f64) -> bool {
@@ -440,6 +633,7 @@ impl App {
                     "Hide" => {
                         if let Some(w) = &self.window {
                             w.set_visible(false);
+                            self.hidden_by_blank = false;
                         }
                     }
                     "About" => self.about_until = Some(Instant::now() + Duration::from_secs(8)),
@@ -646,6 +840,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         audio: crate::audio::Audio::new(
             root.join("characters").join(&character).join("sounds"),
         ),
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        shaper: xshape::Shaper::new(),
         character,
         display,
         pixels: None,
@@ -666,6 +862,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_move: Instant::now(),
         walk_x: 0.0,
         preloaded: String::new(),
+        hidden_by_blank: false,
+        blank_hide_after: None,
     };
 
     let el = EventLoop::new()?;
@@ -690,6 +888,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             w.set_visible(true);
                             w.set_window_level(WindowLevel::AlwaysOnTop);
                         }
+                        // Manual choice wins over the blank-gap auto-hide.
+                        app.hidden_by_blank = false;
+                        app.blank_hide_after = Some(Instant::now() + Duration::from_secs(4));
                     }
                 }
                 ref id if id.starts_with("char:") => app.switch_character(&id[5..]),
@@ -810,15 +1011,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 WindowEvent::CursorMoved { position, .. } => {
                     app.mouse = (position.x, position.y);
-                    if let Some(((pmx, pmy), (wpx, wpy))) = app.press {
-                        let dx = position.x - pmx;
-                        let dy = position.y - pmy;
-                        if dx.abs() + dy.abs() > 6.0 {
+                    if let Some(mut pr) = app.press.take() {
+                        if !pr.dragging
+                            && (position.x - pr.start.0).abs() + (position.y - pr.start.1).abs() > 6.0
+                        {
+                            pr.dragging = true;
+                            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                            app.shaper.grab();
+                            #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
                             if let Some(w) = &app.window {
-                                w.set_outer_position(Position::Physical(PhysicalPosition::new(wpx + dx as i32, wpy + dy as i32)));
-                                app.walk_x = (wpx + dx as i32) as f64;
+                                let _ = w.set_cursor_grab(CursorGrabMode::Confined);
                             }
                         }
+                        if pr.dragging {
+                            if let Some(w) = &app.window {
+                                let dx = position.x - pr.last.0;
+                                let dy = position.y - pr.last.1;
+                                if dx != 0.0 || dy != 0.0 {
+                                    let _ = w.set_outer_position(Position::Physical(
+                                        PhysicalPosition::new(pr.win.0 + dx as i32, pr.win.1 + dy as i32),
+                                    ));
+                                    if let Ok(p) = w.outer_position() {
+                                        // Cursor-relative coords shift by however far
+                                        // the window actually moved; track that so the
+                                        // next delta is pure pointer motion.
+                                        pr.last = (
+                                            position.x - (p.x - pr.win.0) as f64,
+                                            position.y - (p.y - pr.win.1) as f64,
+                                        );
+                                        pr.win = (p.x, p.y);
+                                        app.walk_x = p.x as f64;
+                                    }
+                                }
+                            }
+                        }
+                        app.press = Some(pr);
                     }
                     if let Some(w) = &app.window {
                         w.request_redraw();
@@ -826,25 +1053,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                     let wp = app.window.as_ref().and_then(|w| w.outer_position().ok()).unwrap_or(PhysicalPosition::new(0, 0));
-                    app.press = Some((app.mouse, (wp.x, wp.y)));
+                    app.press = Some(Press {
+                        start: app.mouse,
+                        last: app.mouse,
+                        win: (wp.x, wp.y),
+                        dragging: false,
+                    });
                 }
                 WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
-                    if let Some(((pmx, pmy), _)) = app.press.take() {
-                        let (mx, my) = app.mouse;
-                        let moved = (mx - pmx).abs() + (my - pmy).abs() > 6.0;
-                        if !moved {
+                    if let Some(pr) = app.press.take() {
+                        if pr.dragging {
+                            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                            app.shaper.ungrab();
+                            #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+                            if let Some(w) = &app.window {
+                                let _ = w.set_cursor_grab(CursorGrabMode::None);
+                            }
+                            save_state(app.window.as_deref(), app.scale, &app.character);
+                        } else {
+                            let (mx, my) = app.mouse;
                             if !app.menu_click(mx, my) {
                                 if app.menu_open {
                                     app.menu_open = false;
                                 } else {
-                                    app.pet.touch();
+                                    // Native sprite coords for the hotspot map.
+                                    let sf = app.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0);
+                                    let d = (app.scale * sf).max(0.01);
+                                    app.pet.touch_at(mx / d, my / d);
                                 }
                                 if let Some(w) = &app.window {
                                     w.request_redraw();
                                 }
                             }
-                        } else {
-                            save_state(app.window.as_deref(), app.scale, &app.character);
                         }
                     }
                 }
@@ -868,9 +1108,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(snd) = app.pet.take_sound() {
                     app.audio.play(&snd);
                 }
-                if !app.menu_open && app.pet.walk_dir() != 0 {
+                let dragging = app.press.as_ref().map_or(false, |p| p.dragging);
+                if !app.menu_open && !dragging && app.pet.walk_dir() != 0 {
                     app.apply_walk(now);
                     changed = true;
+                }
+                // Blank inter-scene gap: hide the window instead of showing
+                // an empty (black without compositor) box — the original
+                // deskmate simply left the screen between scenes.
+                let blank = app.pet.sprite().is_none()
+                    && app.bubble.is_none()
+                    && !app.menu_open
+                    && app.about_until.is_none();
+                if let Some(w) = &app.window {
+                    if blank && !app.hidden_by_blank {
+                        let free = app.blank_hide_after.map_or(true, |t| now >= t);
+                        if free {
+                            w.set_visible(false);
+                            app.hidden_by_blank = true;
+                        }
+                    } else if !blank && app.hidden_by_blank {
+                        w.set_visible(true);
+                        w.set_window_level(WindowLevel::AlwaysOnTop);
+                        app.hidden_by_blank = false;
+                    }
                 }
                 // Pre-decode the whole current scene off-thread, then drop
                 // other scenes' frames: playback never decodes mid-frame
