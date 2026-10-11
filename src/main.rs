@@ -15,6 +15,7 @@
 
 mod agent;
 mod ask_ui;
+mod faz;
 mod pet;
 mod scenes;
 

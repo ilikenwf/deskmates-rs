@@ -1,14 +1,18 @@
-//! Scene/asset loading: `scenes.json` (from analysis/faz_convert.py) plus
-//! lazily-decoded frame PNGs (`frames/<scene>/<id>.png`).
+//! Scene/asset loading: the original FAZ scene containers, stored as
+//! gzip-compressed FAZ bytes under `scenes/*.bin.gz` (see
+//! `analysis/pack_assets.py`) and parsed natively by `crate::faz`.
 //!
-//! The JSON keeps the original FAZ script structure: each scene has entry
-//! points and named defs; a def body is a token list of frame refs
-//! (`{id,x,y,rep}`) and sub-def refs (`{name,rep}`).
-
+//! Each scene keeps the original FAZ script structure: entry points and
+//! named defs; a def body is a token list of frame refs (`{id,x,y,rep}`)
+//! and sub-def refs (`{name,rep}`).
+ 
+use crate::faz;
+use flate2::read::GzDecoder;
 use image::RgbaImage;
 use serde::Deserialize;
 use std::collections::HashMap;
 use parking_lot::Mutex;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
@@ -43,14 +47,22 @@ pub struct Scene {
 
 fn two_hundred() -> u32 { 200 }
 
-#[derive(Debug, Deserialize)]
-struct ScenesFile(HashMap<String, Scene>);
+fn read_gunzip(path: &Path) -> Result<Vec<u8>, String> {
+    let f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut gz = GzDecoder::new(f);
+    let mut v = Vec::new();
+    gz.read_to_end(&mut v).map_err(|e| e.to_string())?;
+    Ok(v)
+}
 
 pub struct Scenes {
+    // kept as part of the loader's public surface (asset dir it was loaded from)
+    #[allow(dead_code)]
     pub dir: PathBuf,
     pub scenes: HashMap<String, Scene>,
-    /// scene -> (frame id -> decoded RGBA). Frames are 200x200 indexed PNGs;
-    /// decoded once on first use and kept for the process lifetime.
+    /// Parsed FAZ containers keyed by scene name; frames decode on demand.
+    faz: HashMap<String, faz::Faz>,
+    /// scene -> (frame id -> decoded RGBA), kept for the process lifetime.
     cache: Mutex<HashMap<(String, u32), Option<RgbaImage>>>,
 }
 
@@ -72,10 +84,61 @@ impl Scenes {
 
 
 impl Scenes {
+    /// Load every `scenes/*.bin.gz` FAZ container in `dir`, applying the
+    /// same scene filter as `faz_convert.py`.
     pub fn load(dir: &Path) -> Result<Scenes, String> {
-        let raw = std::fs::read(dir.join("scenes.json")).map_err(|e| format!("scenes.json: {e}"))?;
-        let ScenesFile(scenes) = serde_json::from_slice(&raw).map_err(|e| format!("scenes.json: {e}"))?;
-        Ok(Scenes { dir: dir.to_path_buf(), scenes, cache: Mutex::new(HashMap::new()) })
+        let sdir = dir.join("scenes");
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&sdir)
+            .map_err(|e| format!("{}: {e}", sdir.display()))?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().map(|x| x == "gz").unwrap_or(false))
+            .collect();
+        files.sort();
+        let mut scenes: HashMap<String, Scene> = HashMap::new();
+        let mut fazs: HashMap<String, faz::Faz> = HashMap::new();
+        for path in files {
+            let raw = match read_gunzip(&path) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            let f = match faz::parse_faz(&raw) {
+                Some(f) => f,
+                None => continue,
+            };
+            if !faz::scene_ok(&f) {
+                continue;
+            }
+            let (w, h) = match f.dims {
+                Some(d) => d,
+                None => continue,
+            };
+            let (mut entries, defs) = faz::script_defs(&f);
+            if faz::is_placeholder(&f) {
+                // demo "?" placeholder: keep the art but never play it
+                entries.clear();
+            }
+            let mut defmap: HashMap<String, Vec<Def>> = HashMap::new();
+            for (k, body) in defs {
+                let toks = faz::parse_reflist(&body);
+                let v = toks
+                    .into_iter()
+                    .map(|t| match t {
+                        faz::Tok::Frame { id, x, y, rep } => {
+                            Def { id, x, y, rep, name: String::new() }
+                        }
+                        faz::Tok::Name { name, rep } => Def { id: 0, x: 0, y: 0, rep, name },
+                    })
+                    .collect();
+                defmap.insert(k, v);
+            }
+            let name = f.name.clone();
+            scenes.insert(name.clone(), Scene { name: name.clone(), entries, defs: defmap, w, h });
+            fazs.insert(name, f);
+        }
+        if scenes.is_empty() {
+            return Err(format!("{}: no scenes parsed", sdir.display()));
+        }
+        Ok(Scenes { dir: dir.to_path_buf(), scenes, faz: fazs, cache: Mutex::new(HashMap::new()) })
     }
 
     pub fn frame(&self, scene: &str, id: u32) -> Option<RgbaImage> {
@@ -83,11 +146,7 @@ impl Scenes {
         if let Some(hit) = self.cache.lock().get(&key) {
             return hit.clone();
         }
-        let path = self.dir.join("frames").join(scene).join(format!("{id}.png"));
-        let img = match image::open(&path) {
-            Ok(im) => Some(im.to_rgba8()),
-            Err(_) => None,
-        };
+        let img = self.faz.get(scene).and_then(|f| faz::decode_frame(f, id as u16));
         self.cache.lock().insert(key, img.clone());
         img
     }

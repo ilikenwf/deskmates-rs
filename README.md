@@ -15,8 +15,8 @@ to the Oska store, and shipped a demo that gated characters/scenes behind
   returns nothing.)
 - **No gating.** Every one of the 114 animation scenes is playable; no
   `isUnlocked`, no serial, no nag screens.
-- **100% offline.** Original `.FAZ` animation data is decoded natively at
-  build/convert time and shipped as PNG frames + a scene script JSON.
+- **100% offline.** The original `.FAZ` animation containers ship verbatim
+  (gzip-compressed) and are decoded natively at runtime by `src/faz.rs`.
 
 ### Removed from the original (evidence from the reverse-engineered binaries)
 
@@ -37,23 +37,34 @@ src/
   pet.rs       FAZ script interpreter: entry defs, sub-defs with repeat /
                duration semantics, builtins (exit_wait, fence_*_out, ...),
                screen-edge walking, touch reactions
-  scenes.rs    scenes.json loader + lazy PNG frame cache
+  faz.rs       native FAZ container parser/decoder (port of analysis/faz.py)
+  scenes.rs    scene loader (scenes/*.bin.gz) + decoded-frame cache
   render.rs    blit / rects / ab_glyph text
 analysis/
   ic5_extract.py   ClickTeam Install Creator V5 unpacker (installer -> bins)
   faz.py           FAZ container parser (DIB templates, script pairs,
                    4bpp frame blocks)
-  faz_convert.py   FAZ -> PNG + scenes.json converter
-                   (palette index 8 = transparent key, index 0 = black outline)
-assets/characters/tahni/
-  scenes.json      114 scenes, original script structure preserved
-  frames/<scene>/<id>.png   200x200 indexed PNGs, original art
+  faz_convert.py   FAZ -> PNG + scenes.json converter (superseded by src/faz.rs;
+                   kept as the reference the Rust port and tests/faz_parity.rs
+                   are validated against)
+  pack_assets.py   packs original FAZ scenes -> assets/characters/<name>/scenes/*.bin.gz
+assets/characters/<name>/
+  scenes/<scene>.bin.gz   original FAZ container, gzip-compressed
+                          (200x200 classic; 8bpp scenes up to 316x200 etc.)
 ```
 
 ## Running
 
 ```sh
 cargo run --release          # expects ./assets next to the binary or in cwd
+```
+
+If the `assets/` tree is missing, rebuild it from the extracted installer
+payloads under `analysis/`:
+
+```sh
+python3 analysis/pack_assets.py            # all characters
+python3 analysis/pack_assets.py tahni      # or just one
 ```
 
 Right-click: Touch her / Ask Tahni… / Next scene / Settings… / Hide / About /

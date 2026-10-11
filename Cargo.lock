@@ -427,6 +427,7 @@ name = "deskmates-rs"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
+ "flate2",
  "gtk",
  "image",
  "libc",

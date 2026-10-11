@@ -27,7 +27,7 @@ pub enum Msg {
 }
 
 /// Stage directions the model may embed to move the body while speaking.
-/// Each name is a scene prefix in scenes.json (asserted by test); the pet
+/// Each name is a scene in the shipped asset set (asserted by test); the pet
 /// plays the first entry of the matching scene.
 pub const STAGE_DIRS: &[&str] = &[
     "bulldog_chased", "unwanted_kiss", "shock", "karate", "gstring", "busty",
@@ -106,19 +106,15 @@ mod tests {
     /// a scene in the shipped Tahni asset set.
     #[test]
     fn advertised_stage_dirs_exist_as_scenes() {
-        let raw: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/assets/characters/tahni/scenes.json"
-            ))
-            .unwrap(),
+        let sc = crate::scenes::Scenes::load(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/assets/characters/tahni").as_ref(),
         )
         .unwrap();
         for d in STAGE_DIRS {
             if *d == "next" {
                 continue;
             }
-            assert!(raw.get(*d).is_some(), "stage dir {d} has no scene");
+            assert!(sc.scenes.contains_key(*d), "stage dir {d} has no scene");
         }
     }
 }
