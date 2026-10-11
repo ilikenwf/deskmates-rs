@@ -959,3 +959,43 @@ mod choice_tests {
     }
 }
 
+
+#[cfg(test)]
+mod audit_strips {
+    use super::*;
+    /// Full-size 6-frame strips for borderline scenes flagged from the
+    /// contact sheets, for final gating decisions.
+    #[test]
+    #[ignore]
+    fn borderline_strips() {
+        let scenes = [
+            ("kahli", "kahli_s_predator"), ("kahli", "kahli_s_jetsuit"), ("kahli", "kahli_s_spin"),
+            ("kahli", "kahli_s_supergirl"), ("kahli", "kahli_s_todo"), ("kahli", "kahli_s_wireframe"),
+        ];
+        for (ch, sc) in scenes {
+            let path = format!("{}/assets/characters/{ch}/scenes/{sc}.bin.gz", env!("CARGO_MANIFEST_DIR"));
+            let Ok(gz) = std::fs::File::open(&path) else { println!("{sc}: MISSING"); continue };
+            let mut raw = Vec::new();
+            std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(gz), &mut raw).unwrap();
+            let Some(f) = parse_faz(&raw) else { continue };
+            let mut ids: Vec<u16> = f.frames.keys().copied().collect();
+            ids.sort();
+            let mut strip = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_pixel(6 * 200, 260, image::Rgba([30, 30, 30, 255]));
+            for (k, frac) in [0.1f32, 0.25, 0.4, 0.55, 0.7, 0.9].iter().enumerate() {
+                let id = ids[((ids.len() as f32 * *frac) as usize).min(ids.len() - 1)];
+                let Some(fr) = decode_frame(&f, id) else { continue };
+                let (w, h) = (fr.width(), fr.height());
+                for y in 0..h.min(260) {
+                    for x in 0..w.min(200) {
+                        let p = fr.get_pixel(x, y).0;
+                        if p[3] > 40 {
+                            strip.put_pixel(x + k as u32 * 200, y, image::Rgba(p));
+                        }
+                    }
+                }
+            }
+            strip.save(format!("/tmp/strips/{sc}.png")).unwrap();
+            println!("{sc}: {} frames", ids.len());
+        }
+    }
+}

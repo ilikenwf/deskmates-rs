@@ -5,9 +5,11 @@
 //! pool (idle, Next scene, agent stage directions) unless the user enables
 //! "Adults-only content" in the tray Settings window.
 //!
-//! Curated by visual inspection of 4-frame strips sampled across every
-//! scene timeline (`cargo test audit_tahni -- --ignored`, 2026-10-11):
-//! exposed breasts/genitals gate; butt-only views and bikinis do not.
+//! Curated by visual inspection of 4-frame contact sheets for every scene
+//! (`cargo test sheet_dump -- --ignored`) plus full-size 6-frame strips for
+//! every borderline scene (`cargo test borderline_strips -- --ignored`,
+//! 2026-10-11): exposed breasts/genitals gate; butt-only views, topless
+//! males, and bikinis/high-cut leotards without exposure do not.
 
 /// Scene names considered adults-only. Scene names are character-prefixed
 /// and globally unique within a character's asset set.
@@ -27,6 +29,8 @@ pub const ADULT_SCENES: &[&str] = &[
     "marilyn",             // grate scene ends nude
     "mermaid",             // topless in the water
     "tahni_fashion_shoot", // topless star-cover frame
+    "sailboard",           // topless on the board
+    "tarzan",              // nude male (Tarzan) full-frontal
     // Maeka
     "maeka_creeper", // topless frames mid-scene
     "maeka_dancer",  // topless
@@ -34,8 +38,11 @@ pub const ADULT_SCENES: &[&str] = &[
     // Kahli
     "kahli_s_dive_a", // topless swim
     "kahli_s_dive_b", // topless swim
+    "kahli_s_barbarella", // topless frames mid-scene
+    "kahli_s_gun",        // topless with rifle
     // FatB
-    "fb_s_singe", // original ships crotch-mosaic: nude
+    "fb_s_singe",  // original ships crotch-mosaic: nude
+    "fb_s_streak", // streaker with crotch mosaic
 ];
 
 pub fn is_adult(scene: &str) -> bool {

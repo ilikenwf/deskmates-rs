@@ -387,3 +387,32 @@ impl Pet {
         }
     }
 }
+
+#[cfg(test)]
+mod gating_tests {
+    use super::*;
+    /// Default (adult-off) pools must contain zero gated scenes, and every
+    /// gated tahni scene must be a real playable entry (catches blocklist
+    /// typos that would make a gate vacuous).
+    #[test]
+    fn default_pool_excludes_gated() {
+        let sc = crate::scenes::Scenes::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/characters/tahni"),
+        )
+        .unwrap();
+        let off = Pet::pool(&sc, false);
+        for (s, _) in &off {
+            assert!(!crate::adult::is_adult(s), "gated {s} leaked into default pool");
+        }
+        let on = Pet::pool(&sc, true);
+        for g in crate::adult::ADULT_SCENES {
+            let tahni_scene = !g.starts_with("maeka_") && !g.starts_with("kahli_") && !g.starts_with("fb_");
+            if tahni_scene {
+                assert!(
+                    on.iter().any(|(s, _)| s == g),
+                    "gated tahni scene {g} is not a playable entry"
+                );
+            }
+        }
+    }
+}
