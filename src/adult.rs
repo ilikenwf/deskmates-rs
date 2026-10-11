@@ -5,37 +5,37 @@
 //! pool (idle, Next scene, agent stage directions) unless the user enables
 //! "Adults-only content" in the tray Settings window.
 //!
-//! Curated by visual inspection of every scene's mid-frame (contact sheets,
-//! 2026-10-11): exposed breasts/buttocks/genitals only — merely suggestive
-//! but clothed scenes (g-string, bikinis) are NOT gated.
+//! Curated by visual inspection of 4-frame strips sampled across every
+//! scene timeline (`cargo test audit_tahni -- --ignored`, 2026-10-11):
+//! exposed breasts/genitals gate; butt-only views and bikinis do not.
 
 /// Scene names considered adults-only. Scene names are character-prefixed
 /// and globally unique within a character's asset set.
 pub const ADULT_SCENES: &[&str] = &[
     // Tahni (2D)
-    "shower",          // rear nude shower
-    "tahni_tease",     // topless tease
-    "tahni_underwater",// topless swim
-    "swimming_pool",   // nude male swimmer
-    "surfing",         // nude male surfer
-    "waking_up",       // nude male from behind
+    "shower",              // rear nude shower
+    "tahni_tease",         // full-frontal tease with towel
+    "tahni_underwater",    // topless swim
+    "swimming_pool",       // nude male swimmer
+    "surfing",             // nude male surfer
+    "waking_up",           // nude from behind
+    "balloons",            // balloons pop, full frontal reveal
+    "bath",                // topless in the bath
+    "busty",               // breasts spill out of top
+    "cake",                // topless faceplant
+    "deckchair",           // nude carrying chair
+    "marilyn",             // grate scene ends nude
+    "mermaid",             // topless in the water
+    "tahni_fashion_shoot", // topless star-cover frame
     // Maeka
-    "maeka_creeper",   // topless
-    "maeka_dancer",    // topless
-    // Dancers
-    "dg_t_naughty",
-    "dg_t_playboy",
-    "dg_t_secretboobies",
-    "dg_t_secretnude",
-    // Salt-n-Salsa (SnS)
-    "SnS_t_both_boobsqueeze",
-    "SnS_t_spice_gongboobs",
-    "SnS_t_spice_nipple",
-    "SnS_t_sugar_boobyrap",
-    "SnS_t_sugar_nipple",
-    "SnS_t_sugar_puppetboobs",
-    "SnS_s_spice_pu_topless",
-    "SnS_s_sugar_pu_nude",
+    "maeka_creeper", // topless frames mid-scene
+    "maeka_dancer",  // topless
+    "maeka_emerge",  // full frontal from the hole
+    // Kahli
+    "kahli_s_dive_a", // topless swim
+    "kahli_s_dive_b", // topless swim
+    // FatB
+    "fb_s_singe", // original ships crotch-mosaic: nude
 ];
 
 pub fn is_adult(scene: &str) -> bool {
@@ -51,7 +51,7 @@ mod tests {
         // Every gated name must actually exist in its character's packed
         // scene set, otherwise the blocklist silently rots.
         let mut checked = 0;
-        for c in ["tahni", "maeka"] {
+        for c in ["tahni", "maeka", "kahli", "fatb"] {
             let dir = format!(
                 "{}/assets/characters/{c}/scenes",
                 env!("CARGO_MANIFEST_DIR")

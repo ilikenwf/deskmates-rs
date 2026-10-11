@@ -791,7 +791,7 @@ mod audit_tests {
             return None;
         }
         let mut out = ImageBuffer::from_pixel(4 * 170, 230, image::Rgba([30, 30, 30, 255]));
-        put_text(&mut out, font, name, 2, 2, 15.0);
+        put_text(&mut out, font, name, 2, 2, 20.0);
         for (k, frac) in [0.3f32, 0.55, 0.8, 0.97].iter().enumerate() {
             let id = ids[((ids.len() as f32 * *frac) as usize).min(ids.len() - 1)];
             let Some(fr) = decode_frame(&f, id) else { continue };
@@ -814,20 +814,25 @@ mod audit_tests {
     #[test]
     #[ignore]
     fn audit_tahni() {
+        let ch = std::env::var("AUDIT_CHAR").unwrap_or_else(|_| "tahni".into());
         let font = FontArc::try_from_vec(
             std::fs::read(format!("{}/assets/fonts/LiberationSans-Regular.ttf", env!("CARGO_MANIFEST_DIR"))).unwrap(),
         )
         .unwrap();
-        let mut scenes: Vec<String> = std::fs::read_dir(format!("{}/assets/characters/tahni/scenes", env!("CARGO_MANIFEST_DIR")))
+        let mut scenes: Vec<String> = std::fs::read_dir(format!("{}/assets/characters/{ch}/scenes", env!("CARGO_MANIFEST_DIR")))
             .unwrap()
             .map(|e| e.unwrap().path().file_name().unwrap().to_string_lossy().replace(".bin.gz", ""))
             .filter(|n| !n.starts_with('.'))
             .collect();
         scenes.sort();
+        if let Ok(only) = std::env::var("AUDIT_ONLY") {
+            let want: Vec<&str> = only.split(',').collect();
+            scenes.retain(|s| want.iter().any(|w| s == w));
+        }
         let mut rows: Vec<(String, RgbaImage)> = Vec::new();
         for s in &scenes {
-            let Some(st) = strip("tahni", s, &font) else { continue };
-            if is_placeholder_faz("tahni", s) { continue; }
+            let Some(st) = strip(&ch, s, &font) else { continue };
+            if is_placeholder_faz(&ch, s) { continue; }
             rows.push((s.clone(), st));
         }
         let per = 6;
@@ -839,9 +844,8 @@ mod audit_tests {
                         sheet.put_pixel(x, i as u32 * 230 + y, *st.get_pixel(x, y));
                     }
                 }
-                put_text(&mut sheet, &font, name, 2, (i as u32) * 230 + 2, 22.0);
             }
-            sheet.save(format!("/tmp/audit/tahni_{idx:02}.png")).unwrap();
+            sheet.save(format!("/tmp/audit/{ch}_{idx:02}.png")).unwrap();
         }
         println!("{} strips", rows.len());
     }
