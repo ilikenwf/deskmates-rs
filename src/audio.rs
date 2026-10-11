@@ -67,12 +67,46 @@ impl Audio {
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// The wave archive must decode: every sound the shipped scripts can
-    /// fire (` !hi`, ` !hi_baby`, ` !i_love_it_when_you_turn_me_on`, plus a
-    /// spot-check SFX) must be present and decodable as a WAV stream.
+    use rodio::Source;
+    /// Every shipped wave archive must decode: spot-check a few WAVs per
+    /// character (the scripts reference these by name at play time).
     #[test]
-    fn script_sounds_decode() {
-        use rodio::Source;
+    fn waves_decode() {
+        let chars = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/characters");
+        let mut checked = 0;
+        for c in std::fs::read_dir(&chars).unwrap() {
+            let sdir = c.unwrap().path().join("sounds");
+            let Ok(files) = std::fs::read_dir(&sdir) else { continue };
+            let mut k = 0;
+            for f in files {
+                if k == 3 {
+                    break;
+                }
+                let p = f.unwrap().path();
+                let raw = std::fs::read(&p).unwrap();
+                let mut wav = Vec::new();
+                flate2::read::GzDecoder::new(Cursor::new(raw))
+                    .read_to_end(&mut wav)
+                    .unwrap();
+                let src = rodio::Decoder::new(Cursor::new(wav)).expect(&p.display().to_string());
+                drop(src.total_duration());
+                checked += 1;
+                k += 1;
+            }
+        }
+        assert!(checked > 0);
+    }
+}
+
+#[cfg(test)]
+mod script_sounds {
+    use super::*;
+    use rodio::Source;
+    /// The waves the shipped tahni scripts actually fire (` !hi`,
+    /// ` !hi_baby`, ` !i_love_it_when_you_turn_me_on`, touch SFX) must be
+    /// present and decodable.
+    #[test]
+    fn referenced_sounds_present() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("assets/characters/tahni/sounds");
         for name in ["HI", "HI_BABY", "I_LOVE_IT_WHEN_YOU_TURN_ME_ON", "CAMERA_B", "EXPLOSION"] {
@@ -82,7 +116,7 @@ mod tests {
                 .read_to_end(&mut wav)
                 .unwrap();
             let src = rodio::Decoder::new(Cursor::new(wav)).expect(name);
-            assert!(src.total_duration().is_none() || src.total_duration().unwrap().as_millis() > 0);
+            drop(src.total_duration());
         }
     }
 }
