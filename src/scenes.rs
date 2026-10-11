@@ -34,7 +34,14 @@ pub struct Scene {
     pub name: String,
     pub entries: Vec<String>,
     pub defs: HashMap<String, Vec<Def>>,
+    /// Native frame size; 200x200 for classic FAZ, larger for 8bpp scenes.
+    #[serde(default = "two_hundred")]
+    pub w: u32,
+    #[serde(default = "two_hundred")]
+    pub h: u32,
 }
+
+fn two_hundred() -> u32 { 200 }
 
 #[derive(Debug, Deserialize)]
 struct ScenesFile(HashMap<String, Scene>);
@@ -47,8 +54,22 @@ pub struct Scenes {
     cache: Mutex<HashMap<(String, u32), Option<RgbaImage>>>,
 }
 
-/// Frame canvas size baked into the FAZ format.
-pub const FRAME: u32 = 200;
+impl Scenes {
+    /// Window canvas = the most common frame size across scenes (logo/banner
+    /// scenes may differ; they are rare). Falls back to the classic 200x200.
+    pub fn frame_size(&self) -> (u32, u32) {
+        let mut counts: std::collections::HashMap<(u32, u32), usize> = Default::default();
+        for s in self.scenes.values() {
+            *counts.entry((s.w, s.h)).or_default() += 1;
+        }
+        counts
+            .into_iter()
+            .max_by_key(|(_, n)| *n)
+            .map(|(d, _)| d)
+            .unwrap_or((200, 200))
+    }
+}
+
 
 impl Scenes {
     pub fn load(dir: &Path) -> Result<Scenes, String> {

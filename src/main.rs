@@ -28,9 +28,6 @@ use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEve
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::{Icon, Window, WindowAttributes, WindowLevel};
 
-/// FAZ frame canvas; the window is exactly one frame.
-const WIN: u32 = 200;
-
 const ABOUT_FMT: &str = "DeskMates-rs v0.1\n{CHAR} the Deskmate, safely reimplemented.\nNo phone-home. No unlock keys. No spyware.\n100% offline. Original animation art.\nClick her to make her react!";
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -187,6 +184,8 @@ struct App {
     scenes: Arc<scenes::Scenes>,
     font: FontArc,
     scale: f64,
+    fw: u32,
+    fh: u32,
     matte: bool,
     character: String,
     display: String,
@@ -212,8 +211,8 @@ struct App {
 }
 
 impl App {
-    fn win_logical(&self) -> u32 {
-        (WIN as f64 * self.scale) as u32
+    fn win_logical(&self) -> (u32, u32) {
+        ((self.fw as f64 * self.scale) as u32, (self.fh as f64 * self.scale) as u32)
     }
 
     /// Show text in the speech bubble for a duration scaled by length.
@@ -526,6 +525,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let root = assets_root();
     let sc = scenes::Scenes::load(&root.join("characters").join(&character))?;
+    let (fw0, fh0) = sc.frame_size();
     let sc = Arc::new(sc);
     let font = FontArc::try_from_vec(std::fs::read(root.join("fonts/LiberationSans-Regular.ttf"))?)?;
     let pet = Pet::new(sc.clone());
@@ -552,6 +552,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         scenes: sc,
         font,
         scale: cfg.scale,
+        fw: fw0,
+        fh: fh0,
         matte,
         character,
         display,
@@ -611,7 +613,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .with_decorations(false)
                     .with_transparent(!matte)
                     .with_resizable(false)
-                    .with_inner_size(LogicalSize::new(app.win_logical() as f64, app.win_logical() as f64));
+                    .with_inner_size(LogicalSize::new(app.win_logical().0 as f64, app.win_logical().1 as f64));
                 #[cfg(windows)]
                 {
                     use winit::platform::windows::WindowAttributesExtWindows;
@@ -641,8 +643,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     })
                     .unwrap_or((0, 0, 1920, 1080));
                 let sf0 = window.scale_factor();
-                let ww = (app.win_logical() as f64 * sf0) as i32;
-                let wh = (app.win_logical() as f64 * sf0) as i32;
+                let (ww, wh) = { let (a, b) = app.win_logical(); ((a as f64 * sf0) as i32, (b as f64 * sf0) as i32) };
                 // Deskmates live at the bottom edge of the screen.
                 let pos = match (cfg.x, cfg.y) {
                     (Some(x), Some(y)) if x >= ax - ww && x <= ax + aw && y >= ay && y <= ay + ah => (x, y),
@@ -708,7 +709,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             app.scale = next;
                             save_state(app.window.as_deref(), next, &app.character);
                             if let Some(w) = &app.window {
-                                let _ = w.request_inner_size(LogicalSize::new(app.win_logical() as f64, app.win_logical() as f64));
+                                let (lw, lh) = app.win_logical();
+                                let _ = w.request_inner_size(LogicalSize::new(lw as f64, lh as f64));
                             }
                         }
                     }
