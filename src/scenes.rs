@@ -27,6 +27,9 @@ pub struct Def {
     pub rep: u32,
     #[serde(default)]
     pub name: String,
+    /// ` !name` sound token; non-empty on sound defs.
+    #[serde(default)]
+    pub sound: String,
 }
 
 fn one() -> u32 {
@@ -145,14 +148,23 @@ impl Scenes {
                     .into_iter()
                     .map(|t| match t {
                         faz::Tok::Frame { id, x, y, rep } => {
-                            Def { id, x, y, rep, name: String::new() }
+                            Def { id, x, y, rep, name: String::new(), sound: String::new() }
                         }
-                        faz::Tok::Name { name, rep } => Def { id: 0, x: 0, y: 0, rep, name },
+                        faz::Tok::Name { name, rep } => {
+                            Def { id: 0, x: 0, y: 0, rep, name, sound: String::new() }
+                        }
+                        faz::Tok::Sound { name } => {
+                            Def { id: 0, x: 0, y: 0, rep: 1, name: String::new(), sound: name }
+                        }
                     })
                     .collect();
                 rawmap.insert(k.clone(), body);
                 defmap.insert(k, v);
             }
+            // The original upsold the paid "Deskmate Gold" upgrade with a
+            // nag scene (` !buy_me_now` voice line). Adware: dropped.
+            defmap.remove("dialog_buy_me_now");
+            rawmap.remove("dialog_buy_me_now");
             let name = f.name.clone();
             scenes.insert(name.clone(), Scene { name: name.clone(), entries, defs: defmap, raw: rawmap, w, h });
             fazs.insert(name, f);
@@ -175,13 +187,23 @@ impl Scenes {
                 let v = faz::parse_reflist(&body)
                     .into_iter()
                     .map(|t| match t {
-                        faz::Tok::Frame { id, x, y, rep } => Def { id, x, y, rep, name: String::new() },
-                        faz::Tok::Name { name, rep } => Def { id: 0, x: 0, y: 0, rep, name },
+                        faz::Tok::Frame { id, x, y, rep } => {
+                            Def { id, x, y, rep, name: String::new(), sound: String::new() }
+                        }
+                        faz::Tok::Name { name, rep } => {
+                            Def { id: 0, x: 0, y: 0, rep, name, sound: String::new() }
+                        }
+                        faz::Tok::Sound { name } => {
+                            Def { id: 0, x: 0, y: 0, rep: 1, name: String::new(), sound: name }
+                        }
                     })
                     .collect();
                 rawmap.insert(k.clone(), body);
                 defmap.insert(k, v);
             }
+            // Upsell nag voice line (` !buy_me_now`): adware, dropped.
+            defmap.remove("dialog_buy_me_now");
+            rawmap.remove("dialog_buy_me_now");
             scenes.insert(name.to_string(), Scene { name: name.to_string(), entries, defs: defmap, raw: rawmap, w, h });
             fazs.insert(name.to_string(), f);
             behaviors.insert(name.to_string());

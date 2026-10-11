@@ -19,6 +19,8 @@ const MAX_DEPTH: usize = 24;
 pub enum Step {
     Frame { scene: String, id: u32, x: i32, y: i32 },
     Sub { scene: String, name: String, rep: u32 },
+    /// ` !name` — fire a sound effect, no frame change.
+    Sound { name: String },
     Hold { ms: u64 },
     /// `enter_home`: scene finished.
     End,
@@ -61,6 +63,8 @@ pub struct Pet {
     /// any repeats (fixes "always the same three scenes").
     bag: Vec<usize>,
     bag_at: usize,
+    /// A ` !name` token fired since the last `take_sound`.
+    pending_sound: Option<String>,
 }
 
 /// Scenes that read as touch reactions (the stripped touch.FAS mapped
@@ -97,19 +101,26 @@ impl Pet {
             speed: 1.0,
             bag: Vec::new(),
             bag_at: 0,
+            pending_sound: None,
         };
         pet.start_random();
-        // Original startup: play one weighted-random entry sequence from
-        // common_enter.FAS (`enter => {enter_clap|enter_hole|…}`) first.
-        if pet
-            .scenes
-            .scenes
-            .get("common_enter")
-            .map_or(false, |s| s.raw.contains_key("enter"))
+        // Original startup: S_Deskmate_Enter (walk in + a weighted-random
+        // greeting voice line) from common.FAS; fall back to the bare
+        // entry pool in common_enter.FAS.
+        const STARTUPS: [(&str, &str); 2] =
+            [("common", "S_Deskmate_Enter"), ("common_enter", "enter")];
+        if let Some((s, d)) = STARTUPS
+            .into_iter()
+            .find(|(s, d)| pet.scenes.scenes.get(*s).map_or(false, |x| x.raw.contains_key(*d)))
         {
-            pet.play("common_enter", "enter");
+            pet.play(s, d);
         }
         pet
+    }
+
+    /// Take a fired sound effect name for the host to play.
+    pub fn take_sound(&mut self) -> Option<String> {
+        self.pending_sound.take()
     }
 
     /// Random-pool of entry scenes minus adults-only ones unless enabled.
@@ -243,6 +254,7 @@ impl Pet {
                         steps.push(Step::Frame { scene: scene.to_string(), id, x, y });
                     }
                 }
+                crate::faz::Tok::Sound { name } => steps.push(Step::Sound { name }),
             }
         }
         Some(steps)
@@ -284,6 +296,10 @@ impl Pet {
                     self.cur = Some(Sprite { scene, id, x, y });
                     return true;
                 }
+                Step::Sound { name } => {
+                    self.pending_sound = Some(name);
+                    continue;
+                }
                 Step::Hold { ms } => {
                     self.frame_dur = Duration::from_millis(ms);
                     return true;
@@ -324,14 +340,18 @@ impl Pet {
                         .scenes
                         .get(&scene)
                         .map_or(false, |s| s.raw.contains_key(&name));
-                    if !own
-                        && self
-                            .scenes
-                            .scenes
-                            .get("common")
-                            .map_or(false, |s| s.raw.contains_key(&name))
-                    {
-                        scene = "common".to_string();
+                    if !own {
+                        for fb in ["common", "common_enter"] {
+                            if self
+                                .scenes
+                                .scenes
+                                .get(fb)
+                                .map_or(false, |s| s.raw.contains_key(&name))
+                            {
+                                scene = fb.to_string();
+                                break;
+                            }
+                        }
                     }
                     if let Some(steps) = self.steps_for(&scene, &name) {
                         if self.stack.len() >= MAX_DEPTH {

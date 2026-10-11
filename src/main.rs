@@ -14,6 +14,7 @@
 //! are unlocked.
 
 mod adult;
+mod audio;
 mod agent;
 mod ask_ui;
 mod faz;
@@ -238,6 +239,8 @@ struct App {
     walk_x: f64,
     /// Last scene whose frames were pre-decoded (jank-free playback).
     preloaded: String,
+    /// Wave archive playback for ` !name` script tokens.
+    audio: crate::audio::Audio,
 }
 
 impl App {
@@ -640,6 +643,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fw: fw0,
         fh: fh0,
         matte,
+        audio: crate::audio::Audio::new(
+            root.join("characters").join(&character).join("sounds"),
+        ),
         character,
         display,
         pixels: None,
@@ -859,6 +865,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // scenes: the menu is painted inside the pet window, and a
                 // moving/resizing window makes menu clicks miss.
                 let mut changed = if app.menu_open { false } else { app.pet.tick(now) };
+                if let Some(snd) = app.pet.take_sound() {
+                    app.audio.play(&snd);
+                }
                 if !app.menu_open && app.pet.walk_dir() != 0 {
                     app.apply_walk(now);
                     changed = true;

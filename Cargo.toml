@@ -26,6 +26,7 @@ tray-icon = "0.19"
 # Disable (`--no-default-features`) for cross-checks: ring cannot build for
 # windows-msvc/apple targets from a Linux GNU host.
 ureq = { version = "2", default-features = false, features = ["json", "rustls"], optional = true }
+rodio = { version = "0.22.2", default-features = false, features = ["playback", "wav"] }
 
 [features]
 default = ["agent"]

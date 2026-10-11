@@ -232,6 +232,8 @@ pub fn parse_faz(d: &[u8]) -> Option<Faz> {
 pub enum Tok {
     Frame { id: u32, x: i32, y: i32, rep: u32 },
     Name { name: String, rep: u32 },
+    /// ` !name` — play a sound from the character's wave archive.
+    Sound { name: String },
 }
 
 fn is_digit(c: u8) -> bool {
@@ -270,6 +272,20 @@ pub fn parse_reflist(s: &[u8]) -> Vec<Tok> {
     let mut p = 0usize;
     while p < s.len() {
         let c = s[p];
+        // ` !name`: sound-effect token (original REGEX_SOUND ` !([^,]+)`),
+        // terminated by the next comma or group close.
+        if c == b' ' && s.get(p + 1) == Some(&b'!') {
+            let mut q = p + 2;
+            while q < s.len() && s[q] != b',' && s[q] != b')' {
+                q += 1;
+            }
+            let name = latin1(&s[p + 2..q]).trim_end().to_string();
+            if !name.is_empty() {
+                toks.push(Tok::Sound { name });
+            }
+            p = q;
+            continue;
+        }
         // \[(-?\d+),(-?\d+)\]
         if c == b'[' {
             let mut q = p + 1;
