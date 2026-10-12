@@ -382,7 +382,10 @@ impl Pet {
                     self.walk_dir = self.stack.iter().rev().find_map(|l| (l.dir != 0).then_some(l.dir)).unwrap_or(0);
                 }
                 if self.stack.is_empty() {
-                    self.cur = None;
+                    // The original never blanks between scenes: the sprite
+                    // keeps its last frame through the idle gap until the
+                    // next sequence's first frame replaces it. Clearing
+                    // here was the inter-scene blink.
                     self.next_at = Some(now + Duration::from_millis(600 + rand::rng().random_range(0..2500)));
                     return false;
                 }
@@ -392,7 +395,13 @@ impl Pet {
             lv.idx += 1;
             match step {
                 Step::Frame { scene, id, x, y } => {
-                    self.cur = Some(Sprite { scene, id, x, y });
+                    // A frame token that doesn't decode — e.g. the
+                    // common:0000 "return to base" marker, while common.FAS
+                    // has no frame 0 — means "hold the current image": the
+                    // original sprite never blanks mid-sequence.
+                    if self.cur.is_none() || self.scenes.frame(&scene, id).is_some() {
+                        self.cur = Some(Sprite { scene, id, x, y });
+                    }
                     return true;
                 }
                 Step::Sound { name } => {
@@ -405,7 +414,6 @@ impl Pet {
                 }
                 Step::End | Step::EndPause => {
                     self.stack.clear();
-                    self.cur = None;
                     self.walk_dir = 0;
                     let gap = if matches!(step, Step::EndPause) { 1500 } else { 400 };
                     self.next_at = Some(now + Duration::from_millis(gap + rand::rng().random_range(0..1500)));

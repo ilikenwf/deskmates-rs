@@ -414,6 +414,8 @@ struct App {
     shaper: xshape::Shaper,
     /// Window auto-hidden during a blank inter-scene gap.
     hidden_by_blank: bool,
+    /// Last render drew any visible content (sprite in bounds, matte).
+    drew_content: bool,
     /// Suppress auto-hide until this instant (user just chose Show).
     blank_hide_after: Option<Instant>,
 }
@@ -505,17 +507,26 @@ impl App {
                 p.copy_from_slice(&[40, 40, 46, 255]);
             }
         }
-        // sprite
+        // sprite. Frame 0000 is a real frame (the standing base pose in
+        // banks that have it), not a blank: skipping it was part of the
+        // inter-scene blink. A missing frame simply fails to decode.
+        // A sprite walked off the window's edge draws nothing; the empty
+        // window must auto-hide like a blank gap instead of showing a
+        // black box (checked via canvas alpha below).
         if let Some(sp) = self.pet.sprite().cloned() {
-            if sp.id != 0 {
-                if let Some(img) = self.scenes.frame(&sp.scene, sp.id) {
-                    let s = (self.scale * sf) as f64;
-                    let ox = (sp.x as f64 * self.scale * sf) as i32;
-                    let oy = (sp.y as f64 * self.scale * sf) as i32;
-                    blit(&mut canvas, w, h, &img, ox, oy, s);
-                }
+            if let Some(img) = self.scenes.frame(&sp.scene, sp.id) {
+                let s = (self.scale * sf) as f64;
+                let ox = (sp.x as f64 * self.scale * sf) as i32;
+                let oy = (sp.y as f64 * self.scale * sf) as i32;
+                blit(&mut canvas, w, h, &img, ox, oy, s);
             }
         }
+        // `drew_content`: does the canvas actually show pixels? A held
+        // frame can be a transparent placeholder, and a walked-off sprite
+        // lands outside the window; both must count as blank so the empty
+        // window auto-hides instead of showing a black box.
+        self.drew_content = self.matte
+            || canvas.chunks_exact(4).any(|p| p[0] | p[1] | p[2] != 0);
         // speech bubble (top of window, over the sprite)
         if let Some((text, until)) = self.bubble.clone() {
             if Instant::now() >= until {
@@ -879,6 +890,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         walk_x: 0.0,
         preloaded: String::new(),
         hidden_by_blank: false,
+        drew_content: true,
         blank_hide_after: None,
     };
 
@@ -1173,7 +1185,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Blank inter-scene gap: hide the window instead of showing
                 // an empty (black without compositor) box — the original
                 // deskmate simply left the screen between scenes.
-                let blank = app.pet.sprite().is_none()
+                let blank = !app.drew_content
                     && app.bubble.is_none()
                     && !app.menu_open
                     && app.about_until.is_none();
