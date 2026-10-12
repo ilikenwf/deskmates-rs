@@ -908,24 +908,51 @@ fn blit(canvas: &mut [u8], cw: u32, ch: u32, img: &RgbaImage, x: i32, y: i32, sc
         if py < 0 || py >= ch as i32 {
             continue;
         }
-        let sy = ((dy as f64 / scale) as u32).min(ih - 1);
+        // Pixel-center bilinear sampling: exact nearest at scale == 1,
+        // smooth upscale above it.
+        let fy = (dy as f64 + 0.5) / scale - 0.5;
+        let y0 = fy.floor() as i32;
+        let wy = fy - y0 as f64;
         for dx in 0..dw {
             let px = x + dx;
             if px < 0 || px >= cw as i32 {
                 continue;
             }
-            let sx = ((dx as f64 / scale) as u32).min(iw - 1);
-            let [r, g, b, a] = img.get_pixel(sx, sy).0;
-            if a == 0 {
+            let fx = (dx as f64 + 0.5) / scale - 0.5;
+            let x0 = fx.floor() as i32;
+            let wx = fx - x0 as f64;
+            // Alpha-weighted (premultiplied) taps: fully transparent
+            // pixels must not bleed their (often black) color into
+            // opaque neighbours - only alpha interpolates linearly.
+            let mut wa = 0.0f64;
+            let mut wr = 0.0f64;
+            let mut wg = 0.0f64;
+            let mut wb = 0.0f64;
+            for (oy, wyw) in [(y0, 1.0 - wy), (y0 + 1, wy)] {
+                let oy = oy.clamp(0, ih as i32 - 1) as u32;
+                for (ox, wxw) in [(x0, 1.0 - wx), (x0 + 1, wx)] {
+                    let ox = ox.clamp(0, iw as i32 - 1) as u32;
+                    let [r, g, b, a] = img.get_pixel(ox, oy).0;
+                    let w = a as f64 * wyw * wxw;
+                    wa += w;
+                    wr += w * r as f64;
+                    wg += w * g as f64;
+                    wb += w * b as f64;
+                }
+            }
+            if wa <= 0.0 {
                 continue;
             }
+            let af = wa.round().clamp(1.0, 255.0) as u16;
+            let r = (wr / wa).clamp(0.0, 255.0) as u8;
+            let g = (wg / wa).clamp(0.0, 255.0) as u8;
+            let b = (wb / wa).clamp(0.0, 255.0) as u8;
             let o = (py as usize * cw as usize + px as usize) * 4;
             let d = &mut canvas[o..o + 4];
-            let af = a as u16;
             d[0] = ((r as u16 * af + d[0] as u16 * (255 - af)) / 255) as u8;
             d[1] = ((g as u16 * af + d[1] as u16 * (255 - af)) / 255) as u8;
             d[2] = ((b as u16 * af + d[2] as u16 * (255 - af)) / 255) as u8;
-            d[3] = (af.max(d[3] as u16)) as u8;
+            d[3] = af.max(d[3] as u16) as u8;
         }
     }
 }
@@ -1711,4 +1738,56 @@ fn user_idle_secs() -> Option<u64> {
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 fn user_idle_secs() -> Option<u64> {
     None
+}
+
+#[cfg(test)]
+mod blit_tests {
+    use super::*;
+
+    #[test]
+    fn upscale_smooths_alpha_edge() {
+        // Opaque left half, transparent right half; at 2x the destination
+        // column straddling the source boundary must get partial alpha
+        // (bilinear), where nearest-neighbor would give a hard cliff.
+        let mut img = RgbaImage::new(4, 1);
+        for px in 0..2 {
+            img.put_pixel(px, 0, image::Rgba([255, 255, 255, 255]));
+        }
+        let mut canvas = vec![0u8; 8 * 4];
+        blit(&mut canvas, 8, 1, &img, 0, 0, 2.0);
+        let alphas: Vec<u8> = (0..8).map(|px| canvas[px * 4 + 3]).collect();
+        // dest col 3 straddles src px1/px2 (w .75/.25) -> alpha 191;
+        // col 4 straddles with .25/.75 -> 64; nearest-neighbor would be
+        // [255,255,255,255,0,0,0,0] instead.
+        assert_eq!(alphas[2], 255, "interior stays fully opaque: {alphas:?}");
+        assert!(alphas[3] > 0 && alphas[3] < 255, "expected soft edge: {alphas:?}");
+        assert!(alphas[4] > 0 && alphas[4] < 255, "expected soft edge: {alphas:?}");
+        assert_eq!(alphas[5], 0, "outside the fade untouched: {alphas:?}");
+    }
+
+    #[test]
+    fn scale_one_is_pixel_exact() {
+        let img = RgbaImage::from_pixel(2, 1, image::Rgba([10, 20, 30, 255]));
+        let mut canvas = vec![0u8; 4 * 4];
+        blit(&mut canvas, 4, 1, &img, 0, 0, 1.0);
+        assert_eq!(&canvas[0..4], &[10, 20, 30, 255]);
+        assert_eq!(&canvas[4..8], &[10, 20, 30, 255]);
+        assert_eq!(&canvas[8..12], &[0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn transparent_pixels_do_not_bleed_color() {
+        // Opaque red next to black-transparent: the straddling destination
+        // pixel must be red (premultiplied interp), not a darkened red.
+        let mut img = RgbaImage::new(2, 1);
+        img.put_pixel(0, 0, image::Rgba([200, 0, 0, 255]));
+        img.put_pixel(1, 0, image::Rgba([0, 0, 0, 0]));
+        let mut canvas = vec![0u8; 4 * 4];
+        blit(&mut canvas, 4, 1, &img, 0, 0, 2.0);
+        // dx=1 straddles: taps are red (w .75) and transparent (w .25) ->
+        // a=191, premultiplied red stored as 200*191/255 = 149. Naive
+        // non-premultiplied interp would store 150*191/255 = 112 (bleed).
+        let o = 1 * 4;
+        assert!(canvas[o] >= 140, "red must not darken by bleed: {:?}", &canvas[o..o + 4]);
+    }
 }
