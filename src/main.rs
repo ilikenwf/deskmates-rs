@@ -206,39 +206,20 @@ mod xshape {
             }
         }
 
-        /// Grab the pointer without confinement so motion events keep
-        /// arriving while the cursor is outside the tiny window (drag).
-        /// owner_events=true keeps delivering them to winit's selections.
-        pub fn grab(&mut self) {
-            if self.window.is_none() {
-                self.resolve();
-            }
-            let (Some((conn, _)), Some(win)) = (self.conn.as_ref(), self.window) else {
-                return;
-            };
-            use x11rb::protocol::xproto::{EventMask, GrabMode};
-            let mask = EventMask::BUTTON_PRESS
-                | EventMask::BUTTON_RELEASE
-                | EventMask::POINTER_MOTION
-                | EventMask::BUTTON1_MOTION;
-            let _ = conn.grab_pointer(
-                true,
-                win,
-                mask,
-                GrabMode::ASYNC,
-                GrabMode::ASYNC,
-                0u32,
-                0u32,
-                x11rb::CURRENT_TIME,
-            );
-            let _ = conn.flush();
-        }
-
-        pub fn ungrab(&self) {
-            if let Some((conn, _)) = &self.conn {
-                let _ = conn.ungrab_pointer(x11rb::CURRENT_TIME);
-                let _ = conn.flush();
-            }
+        /// Global pointer position and whether button 1 is held. Polled
+        /// during a drag: an X pointer grab on our side connection would
+        /// steal motion events from winit's connection (they'd queue
+        /// unread), and owner_events only delivers while the pointer is
+        /// still over the tiny window — polling works everywhere.
+        pub fn query_pointer(&self) -> Option<(i32, i32, bool)> {
+            let (conn, screen) = self.conn.as_ref()?;
+            let root = conn.setup().roots[*screen].root;
+            let r = conn.query_pointer(root).ok()?.reply().ok()?;
+            Some((
+                r.root_x as i32,
+                r.root_y as i32,
+                r.mask.contains(x11rb::protocol::xproto::KeyButMask::BUTTON1),
+            ))
         }
         /// Clip the window (bounding + input) to the opaque pixels of the
         /// straight-alpha RGBA `canvas` (stride 4, `w`x`h`).
@@ -356,13 +337,16 @@ fn make_tray(display: &str) -> Option<tray_icon::TrayIcon> {
         .ok()
 }
 
-/// Left-button press state for drag-to-move: absolute-drag from the press
-/// point stalls once the pointer leaves the small window, so past the
-/// threshold we grab the pointer and move incrementally per event.
+/// Left-button press state for drag-to-move. On X11 the drag is driven by
+/// polling the global pointer (see `Shaper::query_pointer`): `off` is the
+/// press point in physical pixels relative to the window origin, so the
+/// window position is simply global - off. Elsewhere winit's confined grab
+/// keeps motion flowing and deltas are applied per event.
 struct Press {
     start: (f64, f64),
     last: (f64, f64),
     win: (i32, i32),
+    off: (i32, i32),
     dragging: bool,
 }
 
@@ -1016,13 +1000,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             && (position.x - pr.start.0).abs() + (position.y - pr.start.1).abs() > 6.0
                         {
                             pr.dragging = true;
-                            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                            app.shaper.grab();
                             #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
                             if let Some(w) = &app.window {
                                 let _ = w.set_cursor_grab(CursorGrabMode::Confined);
                             }
                         }
+                        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
                         if pr.dragging {
                             if let Some(w) = &app.window {
                                 let dx = position.x - pr.last.0;
@@ -1053,18 +1036,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                     let wp = app.window.as_ref().and_then(|w| w.outer_position().ok()).unwrap_or(PhysicalPosition::new(0, 0));
+                    let sf = app.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0);
                     app.press = Some(Press {
                         start: app.mouse,
                         last: app.mouse,
                         win: (wp.x, wp.y),
+                        off: ((app.mouse.0 * sf) as i32, (app.mouse.1 * sf) as i32),
                         dragging: false,
                     });
                 }
                 WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
                     if let Some(pr) = app.press.take() {
                         if pr.dragging {
-                            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                            app.shaper.ungrab();
                             #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
                             if let Some(w) = &app.window {
                                 let _ = w.set_cursor_grab(CursorGrabMode::None);
@@ -1107,6 +1090,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut changed = if app.menu_open { false } else { app.pet.tick(now) };
                 if let Some(snd) = app.pet.take_sound() {
                     app.audio.play(&snd);
+                }
+                // X11 drag: follow the global pointer while button 1 is
+                // held; a release anywhere (even far outside the tiny
+                // window) ends the drag.
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                if let Some((off, dragging)) = app.press.as_ref().map(|p| (p.off, p.dragging)) {
+                    if dragging {
+                        match app.shaper.query_pointer() {
+                            Some((gx, gy, true)) => {
+                                if let Some(w) = &app.window {
+                                    let _ = w.set_outer_position(Position::Physical(
+                                        PhysicalPosition::new(gx - off.0, gy - off.1),
+                                    ));
+                                    if let Ok(p) = w.outer_position() {
+                                        app.walk_x = p.x as f64;
+                                    }
+                                }
+                            }
+                            Some((_, _, false)) | None => {
+                                app.press = None;
+                                save_state(app.window.as_deref(), app.scale, &app.character);
+                            }
+                        }
+                    }
                 }
                 let dragging = app.press.as_ref().map_or(false, |p| p.dragging);
                 if !app.menu_open && !dragging && app.pet.walk_dir() != 0 {
