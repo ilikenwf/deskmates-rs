@@ -1267,6 +1267,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(snd) = app.pet.take_sound() {
                     app.audio.play(&snd);
                 }
+                if let Some(t) = app.pet.take_talk() {
+                    app.speak(&t);
+                }
                 // X11 drag: follow the global pointer while button 1 is
                 // held; a release anywhere (even far outside the tiny
                 // window) ends the drag.

@@ -88,6 +88,14 @@ pub struct Pet {
     gap_phase: u8,
     /// Debug (`--scene NAME`): loop one scene forever, no random pool.
     pub scene_loop: Option<String>,
+    /// Ambient random speech: the orphaned `dialog_*` defs. The FAS
+    /// scripts never reference them; the original player fired them
+    /// periodically as random conversation.
+    dialogs: Vec<String>,
+    /// When to fire the next ambient line.
+    talk_at: Option<Instant>,
+    /// Bubble text for a fired ambient line (host consumes via take_talk).
+    pending_talk: Option<String>,
 }
 
 /// Scenes that read as touch reactions (the stripped touch.FAS mapped
@@ -102,6 +110,17 @@ fn frame_dur_for(speed: f64) -> Duration {
     Duration::from_millis((90.0 / speed) as u64)
 }
 
+/// `dialog_i_can_kick_butt` -> `I can kick butt`: bubble text for an
+/// ambient voice line (the FAS stores only the sound name).
+fn humanize_dialog(def: &str) -> String {
+    let words = def.trim_start_matches("dialog_").replace('_', " ");
+    let mut chars = words.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 impl Pet {
     pub fn new(scenes: Arc<Scenes>, adult: bool) -> Pet {
         let entries = Self::pool(&scenes, adult);
@@ -111,6 +130,21 @@ impl Pet {
                 entries.iter().find(|(s, _)| s == r).cloned().map(|(s, e)| (s, e))
             })
             .collect();
+        let mut dialogs: Vec<String> = ["touch", "common"]
+            .into_iter()
+            .filter_map(|sn| scenes.scenes.get(sn))
+            .flat_map(|s| {
+                s.raw
+                    .keys()
+                    .filter(|k| k.starts_with("dialog_"))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            // The Gold-upgrade nag voice: adware, never ambient chatter.
+            .filter(|k| k != "dialog_buy_me_now")
+            .collect();
+        dialogs.sort();
+        dialogs.dedup();
         let mut pet = Pet {
             scenes,
             entries,
@@ -129,6 +163,11 @@ impl Pet {
             interstitial: Vec::new(),
             gap_phase: 0,
             scene_loop: None,
+            dialogs,
+            talk_at: Some(
+                Instant::now() + Duration::from_secs(45 + rand::rng().random_range(0..60)),
+            ),
+            pending_talk: None,
         };
         pet.start_random();
         // Original startup: S_Deskmate_Enter (walk in + a weighted-random
@@ -148,6 +187,11 @@ impl Pet {
     /// Take a fired sound effect name for the host to play.
     pub fn take_sound(&mut self) -> Option<String> {
         self.pending_sound.take()
+    }
+
+    /// Take the bubble text for a fired ambient dialog line.
+    pub fn take_talk(&mut self) -> Option<String> {
+        self.pending_talk.take()
     }
 
     /// Random-pool of entry scenes minus adults-only ones unless enabled.
@@ -309,26 +353,49 @@ impl Pet {
             if let Some(at) = self.next_at {
                 if now >= at {
                     self.next_at = None;
-                    if let Some(s) = self.scene_loop.clone() {
-                        if !self.play_named(&s) {
-                            self.start_random();
+                    // Ambient speech: fire one orphaned dialog_* def in
+                    // the gap (the original player's random conversation
+                    // timer). Skipped while --scene pins a debug loop.
+                    let mut talked = false;
+                    if self.scene_loop.is_none() {
+                        if let Some(t) = self.talk_at {
+                            if now >= t && !self.dialogs.is_empty() {
+                                if let Some(d) = self.dialogs.choose(&mut rand::rng()).cloned() {
+                                    self.talk_at = Some(
+                                        now + Duration::from_secs(60 + rand::rng().random_range(0..120)),
+                                    );
+                                    self.pending_talk = Some(humanize_dialog(&d));
+                                    self.play("touch", &d);
+                                    if self.stack.is_empty() {
+                                        self.start_random();
+                                    }
+                                    talked = true;
+                                }
+                            }
                         }
-                    } else if self.gap_phase == 0 && !self.interstitial.is_empty() {
-                        // User-classified interstitial scenes fill the gap
-                        // (classify candidates with --scenes/--scene NAME);
-                        // the filler ending re-arms the gap for a real
-                        // scene via gap_phase.
-                        self.gap_phase = 1;
-                        let s = self.interstitial
-                            [rand::rng().random_range(0..self.interstitial.len())]
-                            .clone();
-                        if !self.play_named(&s) {
+                    }
+                    if !talked {
+                        if let Some(s) = self.scene_loop.clone() {
+                            if !self.play_named(&s) {
+                                self.start_random();
+                            }
+                        } else if self.gap_phase == 0 && !self.interstitial.is_empty() {
+                            // User-classified interstitial scenes fill the gap
+                            // (classify candidates with --scenes/--scene NAME);
+                            // the filler ending re-arms the gap for a real
+                            // scene via gap_phase.
+                            self.gap_phase = 1;
+                            let s = self.interstitial
+                                [rand::rng().random_range(0..self.interstitial.len())]
+                                .clone();
+                            if !self.play_named(&s) {
+                                self.gap_phase = 0;
+                                self.start_random();
+                            }
+                        } else {
                             self.gap_phase = 0;
                             self.start_random();
                         }
-                    } else {
-                        self.gap_phase = 0;
-                        self.start_random();
                     }
                     changed = true;
                 }
