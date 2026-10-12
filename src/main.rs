@@ -325,13 +325,20 @@ fn make_tray(display: &str) -> Option<tray_icon::TrayIcon> {
     let icon = tray_icon::Icon::from_rgba(img.into_raw(), tw, th).ok()?;
     let menu = Menu::new();
     let toggle = MenuItem::with_id("toggle", "Show / Hide", true, None);
+    // Full action mirror of the in-window right-click menu: the tray is the
+    // hitbox-proof entry point (the pet window is tiny and shaped).
+    let touch = MenuItem::with_id("touch", "Touch her", true, None);
+    let ask = MenuItem::with_id("ask", "Ask…", true, None);
+    let next = MenuItem::with_id("next", "Next scene", true, None);
+    let settings = MenuItem::with_id("settings", "Settings…", true, None);
+    let about = MenuItem::with_id("about", "About", true, None);
     let chars = Submenu::new("Character", true);
     for c in CHARACTERS {
         let item = MenuItem::with_id(format!("char:{c}"), display_name(c), true, None);
         chars.append_items(&[&item]).ok();
     }
     let quit = MenuItem::with_id("quit", "Quit", true, None);
-    menu.append_items(&[&toggle, &chars, &quit]).ok()?;
+    menu.append_items(&[&toggle, &touch, &ask, &next, &chars, &settings, &about, &quit]).ok()?;
     TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
@@ -900,6 +907,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Manual choice wins over the blank-gap auto-hide.
                         app.hidden_by_blank = false;
                         app.blank_hide_after = Some(Instant::now() + Duration::from_secs(4));
+                    }
+                }
+                ref id if id == "touch" => app.pet.touch(),
+                ref id if id == "ask" => {
+                    if app.agent.enabled() {
+                        fork_child("--ask-ui");
+                    } else {
+                        app.speak("I can chat, but no AI endpoint is set. Open Settings from the tray to add one!");
+                    }
+                }
+                ref id if id == "next" => app.pet.next_scene(),
+                ref id if id == "settings" => fork_child("--settings-ui"),
+                ref id if id == "about" => {
+                    app.about_until = Some(Instant::now() + Duration::from_secs(8));
+                    if let Some(w) = &app.window {
+                        w.set_visible(true);
+                        w.set_window_level(WindowLevel::AlwaysOnTop);
+                        app.hidden_by_blank = false;
                     }
                 }
                 ref id if id.starts_with("char:") => app.switch_character(&id[5..]),

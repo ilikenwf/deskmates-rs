@@ -31,6 +31,7 @@ impl Audio {
     /// Play `NAME.wav.gz` from the character's sounds dir (fire-and-forget;
     /// overlapping sounds mix on the device).
     pub fn play(&self, name: &str) {
+        if std::env::var("DESK_AUDIO_DEBUG").is_ok() { eprintln!("SND CALL {}", name); }
         let Some(sink) = &self.sink else { return };
         let key = name.trim().to_uppercase();
         if key.is_empty() {
@@ -53,12 +54,16 @@ impl Audio {
                         cache.insert(key, w.clone());
                         w
                     }
-                    None => return,
+                    None => {
+                        if std::env::var("DESK_AUDIO_DEBUG").is_ok() { eprintln!("SND MISS {key}"); }
+                        return;
+                    }
                 }
             }
         };
         use rodio::source::Source;
         if let Ok(src) = rodio::Decoder::new(Cursor::new(bytes.as_ref().clone())) {
+            if std::env::var("DESK_AUDIO_DEBUG").is_ok() { eprintln!("SND PLAY {}", name.trim().to_uppercase()); }
             sink.mixer().add(src.amplify(0.7));
         }
     }

@@ -191,20 +191,25 @@ impl Pet {
             }
         };
         // Definition names are `T0x` + 6 lowercase hex digits (python
-        // `%06x` of the hotspot color) + state; a tap is press+release, so
-        // prefer the full `up` reaction, then `down`, then `start`.
+        // `%06x` of the hotspot color). Prefer whichever variant actually
+        // carries a voice line (` !name` token): Tahni's `up` defs talk,
+        // but Kahli's `up` is a bare blink while `down` holds her voice +
+        // SFX sequence.
         let base = format!("T0x{color:06x}");
-        for suf in ["up", "down", "start"] {
+        let mut best: Option<(bool, std::cmp::Reverse<usize>, String)> = None;
+        for (order, suf) in ["up", "down", "start"].iter().enumerate() {
             let def = format!("{base}{suf}");
-            if self
-                .scenes
-                .scenes
-                .get("touch")
-                .map_or(false, |s| s.raw.contains_key(&def))
-            {
-                self.play("touch", &def);
-                return;
+            if let Some(body) = self.scenes.scenes.get("touch").and_then(|s| s.raw.get(&def)) {
+                let voiced = body.windows(2).any(|w| w == b" !");
+                let cand = (voiced, std::cmp::Reverse(order), def);
+                if best.as_ref().map_or(true, |b| cand > *b) {
+                    best = Some(cand);
+                }
             }
+        }
+        if let Some((_, _, def)) = best {
+            self.play("touch", &def);
+            return;
         }
         self.touch();
     }
@@ -213,6 +218,21 @@ impl Pet {
     pub fn touch(&mut self) {
         if let Some((scene, entry)) = self.reactions.choose(&mut rand::rng()).cloned() {
             self.play(&scene, &entry);
+            return;
+        }
+        // Characters without curated reaction scenes (everyone but Tahni):
+        // fire a voiced hotspot definition from their own touch.FAS.
+        if let Some(s) = self.scenes.scenes.get("touch") {
+            let voiced: Vec<String> = s
+                .raw
+                .keys()
+                .filter(|k| k.starts_with("T0x") && s.raw.get(*k).is_some_and(|b| b.windows(2).any(|w| w == b" !")))
+                .cloned()
+                .collect();
+            if let Some(def) = voiced.choose(&mut rand::rng()) {
+                let def = def.clone();
+                self.play("touch", &def);
+            }
         }
     }
 
