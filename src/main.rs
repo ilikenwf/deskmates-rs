@@ -28,7 +28,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::dpi::{LogicalSize, PhysicalPosition, Position};
 use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoop};
+use winit::event_loop::EventLoop;
+use winit::event_loop::ControlFlow;
 use winit::window::{Icon, Window, WindowAttributes, WindowLevel};
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 use winit::window::CursorGrabMode;
@@ -327,8 +328,9 @@ fn make_tray(display: &str) -> Option<tray_icon::TrayIcon> {
     let toggle = MenuItem::with_id("toggle", "Show / Hide", true, None);
     // Full action mirror of the in-window right-click menu: the tray is the
     // hitbox-proof entry point (the pet window is tiny and shaped).
+    let mv = MenuItem::with_id("move", "Move", true, None);
     let touch = MenuItem::with_id("touch", "Touch her", true, None);
-    let ask = MenuItem::with_id("ask", "Ask…", true, None);
+    let ask = MenuItem::with_id("ask", format!("Ask {}…", display), true, None);
     let next = MenuItem::with_id("next", "Next scene", true, None);
     let settings = MenuItem::with_id("settings", "Settings…", true, None);
     let about = MenuItem::with_id("about", "About", true, None);
@@ -338,7 +340,7 @@ fn make_tray(display: &str) -> Option<tray_icon::TrayIcon> {
         chars.append_items(&[&item]).ok();
     }
     let quit = MenuItem::with_id("quit", "Quit", true, None);
-    menu.append_items(&[&toggle, &touch, &ask, &next, &chars, &settings, &about, &quit]).ok()?;
+    menu.append_items(&[&toggle, &mv, &touch, &ask, &next, &chars, &settings, &about, &quit]).ok()?;
     TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
@@ -369,7 +371,9 @@ struct MenuItem {
 
 const MENU: &[MenuItem] = &[
     MenuItem { label: "Touch her" },
-    MenuItem { label: "Ask Tahni…" },
+    // `{CHAR}` is replaced with the active character's display name at
+    // draw time, so the label follows switch_character.
+    MenuItem { label: "Ask {CHAR}…" },
     MenuItem { label: "Next scene" },
     MenuItem { label: "Next character" },
     MenuItem { label: "Settings…" },
@@ -425,6 +429,83 @@ struct App {
     drew_content: bool,
     /// Suppress auto-hide until this instant (user just chose Show).
     blank_hide_after: Option<Instant>,
+    /// Tray "Move" armed at this instant: the window follows the global
+    /// pointer until the next click lands it (None = not moving).
+    move_mode: Option<Instant>,
+}
+
+/// EWMH `_NET_WORKAREA` rectangles `(x, y, w, h)` published by the WM
+/// (KDE/GNOME publish them on X and under XWayland), cached per process.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+static NET_WORKAREAS: std::sync::LazyLock<Vec<(i32, i32, i32, i32)>> = std::sync::LazyLock::new(|| {
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::xproto::ConnectionExt as _;
+        let Ok((conn, _)) = x11rb::connect(None) else {
+            return Vec::new();
+        };
+        let root = conn.setup().roots[0].root;
+        let Some(atom) = conn.intern_atom(false, b"_NET_WORKAREA").ok().and_then(|c| c.reply().ok()) else {
+            return Vec::new();
+        };
+        let Some(prop) = conn
+            .get_property(false, root, atom.atom, x11rb::protocol::xproto::AtomEnum::CARDINAL, 0, 64)
+            .ok()
+            .and_then(|c| c.reply().ok())
+        else {
+            return Vec::new();
+        };
+        let vals: Vec<u32> = prop.value32().map(|it| it.collect()).unwrap_or_default();
+        vals.chunks_exact(4)
+            .map(|c| (c[0] as i32, c[1] as i32, c[2] as i32, c[3] as i32))
+            .collect()
+});
+
+/// Monitor work area (taskbar/docks excluded) as `(x, y, w, h)` — the
+/// clone of the original's `SPI_GETWORKAREA` (PLAYER_RE §2). winit 0.30
+/// exposes no work area, so on X we take the WM's `_NET_WORKAREA` rect
+/// that overlaps the monitor most; without a WM (Xvfb, bare X) the full
+/// monitor is the work area.
+fn work_area(m: &winit::monitor::MonitorHandle) -> (i32, i32, i32, i32) {
+    let o = m.position();
+    let s = m.size();
+    let full = (o.x, o.y, s.width as i32, s.height as i32);
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        let mut best: Option<((i32, i32, i32, i32), i64)> = None;
+        for &r in NET_WORKAREAS.iter() {
+            let ix = (full.0 + full.2).min(r.0 + r.2) - full.0.max(r.0);
+            let iy = (full.1 + full.3).min(r.1 + r.3) - full.1.max(r.1);
+            if ix <= 0 || iy <= 0 {
+                continue;
+            }
+            let area = ix as i64 * iy as i64;
+            if best.map_or(true, |(_, a)| area > a) {
+                best = Some((r, area));
+            }
+        }
+        if let Some((r, _)) = best {
+            return r;
+        }
+    }
+    full
+}
+
+/// PLAYER_RE §2 "Rest position": clamp a requested rest point so the
+/// window stays inside the work area; if less than 2/3 of the sprite
+/// would be visible there, re-center it in the work area instead (the
+/// original's home-anchor behavior).
+fn clamp_rest(x: i32, y: i32, ww: i32, wh: i32, wa: (i32, i32, i32, i32)) -> (i32, i32) {
+    let (wx, wy, waw, wah) = wa;
+    let (lox, hix) = (wx.min(wx + waw - ww), wx.max(wx + waw - ww));
+    let (loy, hiy) = (wy.min(wy + wah - wh), wy.max(wy + wah - wh));
+    let (cx, cy) = (x.clamp(lox, hix), y.clamp(loy, hiy));
+    let vis_w = (cx + ww).min(wx + waw) - cx.max(wx);
+    let vis_h = (cy + wh).min(wy + wah) - cy.max(wy);
+    if vis_w * 3 < ww * 2 || vis_h * 3 < wh * 2 {
+        (wx + (waw - ww) / 2, wy + (wah - wh) / 2)
+    } else {
+        (cx, cy)
+    }
 }
 
 impl App {
@@ -450,6 +531,13 @@ impl App {
         self.character = name.to_string();
         self.display = display_name(name);
         self.pet = Pet::new(self.scenes.clone(), load_config().adult);
+        // Rebind sound playback to the new character's sounds dir. The
+        // WAV cache lives inside Audio keyed by bare name, so rebuilding
+        // it here also stops same-named waves (LAND, SWOOSH_A, …) from
+        // leaking across characters after a switch.
+        self.audio = crate::audio::Audio::new(
+            assets_root().join("characters").join(name).join("sounds"),
+        );
         self.preloaded = String::new();
         self.bubble = None;
         self.menu_open = false;
@@ -475,40 +563,50 @@ impl App {
         let secs = (2.5 + text.chars().count() as f64 * 0.06).min(14.0);
         self.bubble = Some((text.to_string(), Instant::now() + Duration::from_secs_f64(secs)));
     }
-    /// Walk the window along the bottom of the monitor per pet.walk_dir(),
-    /// and slide it between a screen edge and its rest position for
-    /// `fence_*` transitions (walk in / walk out).
+    /// Walk the window along the bottom of the monitor's work area per
+    /// pet.walk_dir(), and slide it between a screen edge and its rest
+    /// position for `fence_*` transitions (walk in / walk out).
+    ///
+    /// Speed follows the original: `[dx,dy]` is a signed int16 delta
+    /// applied per 100 ms frame tick — `[200,0]` = 200 px/frame =
+    /// 2000 px/s (PLAYER_RE §2).
     fn apply_walk(&mut self, now: Instant) {
         let Some(w) = &self.window else { return };
         let dt = now.duration_since(self.last_move).as_secs_f64().min(0.25);
         self.last_move = now;
-        let speed = 70.0 * self.scale;
+        let speed = 2000.0 * self.scale;
         if let Some(f) = self.pet.fence() {
             let Some(m) = w.current_monitor().or_else(|| w.primary_monitor()) else { return };
-            let (mx, my, mw, mh) = (m.position().x, m.position().y, m.size().width as i32, m.size().height as i32);
+            let wa = work_area(&m);
             let (ww, wh) = {
                 let s = w.outer_size();
                 (s.width as i32, s.height as i32)
             };
             let p = match w.outer_position() { Ok(p) => p, Err(_) => return };
-            // Rest position: where the window sits when not transitioning.
-            let rest = self.fence_rest.unwrap_or((p.x, p.y));
-            if self.fence_rest.is_none() {
-                self.fence_rest = Some(rest);
-            }
-            // Edge anchor: window fully off-screen at the fence edge.
+            // Rest position: the home anchor, clamped into the work area
+            // with the <2/3-visible recenter (§2 "Rest position").
+            let rest = match self.fence_rest {
+                Some(r) => r,
+                None => {
+                    let r = clamp_rest(p.x, p.y, ww, wh, wa);
+                    self.fence_rest = Some(r);
+                    r
+                }
+            };
+            // Edge anchor: window fully off-screen at the fence edge,
+            // measured against the work area (`fence_home` = inset 1).
             let ex = match f.dx {
-                1 => mx - ww,
-                -1 => mx + mw,
+                1 => wa.0 - ww,
+                -1 => wa.0 + wa.2,
                 _ => rest.0,
             };
             let ey = match f.dy {
-                1 => my - wh,
-                -1 => my + mh,
+                1 => wa.1 - wh,
+                -1 => wa.1 + wa.3,
                 _ => rest.1,
             };
             let (tx, ty) = if f.entering { (rest.0, rest.1) } else { (ex, ey) };
-            let step = speed * 2.2 * dt;
+            let step = speed * dt;
             let mut nx = p.x as f64;
             let mut ny = p.y as f64;
             let mut done = true;
@@ -541,14 +639,14 @@ impl App {
             return;
         }
         let Some(m) = w.current_monitor().or_else(|| w.primary_monitor()) else { return };
-        let (mx, mw) = (m.position().x, m.size().width as i32);
+        let wa = work_area(&m);
         let ww = w.outer_size().width as i32;
         let mut x = self.walk_x + dir as f64 * speed * dt;
-        // Clamp at the screen edges: a walked-off character stops just off
-        // screen (the original sprite simply left the desktop); the old
-        // wrap-around made the empty window march forever.
-        let lo = (mx - ww + 24) as f64;
-        let hi = (mx + mw - 24) as f64;
+        // Clamp at the work-area edges: a walked-off character stops just
+        // off screen (the original sprite simply left the desktop); the
+        // old wrap-around made the empty window march forever.
+        let lo = (wa.0 - ww + 24) as f64;
+        let hi = (wa.0 + wa.2 - 24) as f64;
         if x < lo || x > hi {
             x = x.clamp(lo, hi);
             if (x - self.walk_x).abs() < 0.5 {
@@ -574,12 +672,9 @@ impl App {
                 return Some(false);
             }
             let m = w.current_monitor().or_else(|| w.primary_monitor())?;
-            let (mx, my, mw, mh) = (
-                m.position().x,
-                m.position().y,
-                m.size().width as i32,
-                m.size().height as i32,
-            );
+            // Off-screen is measured against the work area (§2): the
+            // taskbar strip counts as "not on the desk".
+            let (mx, my, mw, mh) = work_area(&m);
             let s = w.outer_size();
             let p = w.outer_position().ok()?;
             let (ww, wh) = (s.width as i32, s.height as i32);
@@ -666,7 +761,8 @@ impl App {
             for (i, item) in MENU.iter().enumerate() {
                 fill_rect(&mut canvas, w, h, bx, by, bw, bh, [245, 245, 250, 235]);
                 stroke_rect(&mut canvas, w, h, bx, by, bw, bh, [120, 120, 130, 255]);
-                draw_text(&mut canvas, w, h, &self.font, item.label, bx as f32 + 8.0 * s, by as f32 + bh as f32 * 0.68, PxScale::from(13.0 * s), [20, 20, 25, 255]);
+                let label = item.label.replace("{CHAR}", &self.display);
+                draw_text(&mut canvas, w, h, &self.font, &label, bx as f32 + 8.0 * s, by as f32 + bh as f32 * 0.68, PxScale::from(13.0 * s), [20, 20, 25, 255]);
                 self.menu_rects.push((i, (bx, by, bw, bh)));
                 by += bh;
             }
@@ -726,7 +822,7 @@ impl App {
                 self.menu_open = false;
                 match MENU[*i].label {
                     "Touch her" => self.pet.touch(),
-                    "Ask Tahni…" => {
+                    "Ask {CHAR}…" => {
                         if self.agent.enabled() {
                             fork_child("--ask-ui");
                         } else {
@@ -1001,8 +1097,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         off_since: None,
         drew_content: true,
         blank_hide_after: None,
+        move_mode: None,
     };
 
+    // winit 0.30 picks the native Wayland backend when WAYLAND_DISPLAY is
+    // set, and xdg-shell forbids client self-move — walking would do
+    // nothing on a Wayland desktop. Force the X11 backend so we run under
+    // XWayland, where programmatic window moves work (the window stays
+    // WM-managed there; the override-redirect gate in the Resumed handler
+    // only fires on pure-X11 sessions).
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    let el = {
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        let mut builder = EventLoop::builder();
+        builder.with_x11();
+        builder.build()?
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     let el = EventLoop::new()?;
     el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(16)));
     #[allow(deprecated)]
@@ -1026,6 +1137,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             w.set_window_level(WindowLevel::AlwaysOnTop);
                         }
                         // Manual choice wins over the blank-gap auto-hide.
+                        app.hidden_by_blank = false;
+                        app.blank_hide_after = Some(Instant::now() + Duration::from_secs(4));
+                    }
+                }
+                ref id if id == "move" => {
+                    // Tray "Move": the window follows the global pointer
+                    // until the next click lands it (see AboutToWait).
+                    app.move_mode = Some(Instant::now());
+                    if let Some(w) = &app.window {
+                        w.set_visible(true);
+                        w.set_window_level(WindowLevel::AlwaysOnTop);
                         app.hidden_by_blank = false;
                         app.blank_hide_after = Some(Instant::now() + Duration::from_secs(4));
                     }
@@ -1068,7 +1190,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     use winit::platform::windows::WindowAttributesExtWindows;
                     attrs = attrs.with_skip_taskbar(true);
                 }
-                // X11: override-redirect = no WM, no taskbar, always ours.
+                // Pure X11 (no Wayland): override-redirect = no WM, no
+                // taskbar, always ours. Under XWayland the window stays
+                // WM-managed so programmatic moves go through the WM.
                 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 {
                     use winit::platform::x11::WindowAttributesExtX11;
@@ -1085,19 +1209,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let (ax, ay, aw, ah) = window
                     .current_monitor()
                     .or_else(|| window.primary_monitor())
-                    .map(|m| {
-                        let s = m.size();
-                        let o = m.position();
-                        (o.x, o.y, s.width as i32, s.height as i32)
-                    })
+                    .map(|m| work_area(&m))
                     .unwrap_or((0, 0, 1920, 1080));
                 let sf0 = window.scale_factor();
                 let (ww, wh) = { let (a, b) = app.win_logical(); ((a as f64 * sf0) as i32, (b as f64 * sf0) as i32) };
-                // Deskmates live at the bottom edge of the screen.
+                // Deskmates live at the bottom edge of the work area
+                // (`fence_home` = work area inset 1, PLAYER_RE §2).
                 let pos = match (cfg.x, cfg.y) {
                     (Some(x), Some(y)) if x >= ax - ww && x <= ax + aw && y >= ay && y <= ay + ah => (x, y),
                     _ => ((ax + aw / 2 - ww / 2 + offset * (ww + 24)).min(ax + aw - ww), ay + ah - wh),
                 };
+                let pos = clamp_rest(pos.0, pos.1, ww, wh, (ax, ay, aw, ah));
                 window.set_outer_position(Position::Physical(PhysicalPosition::new(pos.0, pos.1)));
                 app.walk_x = pos.0 as f64;
                 let window = Arc::new(window);
@@ -1206,17 +1328,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
-                    let wp = app.window.as_ref().and_then(|w| w.outer_position().ok()).unwrap_or(PhysicalPosition::new(0, 0));
-                    let sf = app.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0);
-                    let gstart = app.shaper.query_pointer().map(|(x, y, _)| (x, y)).unwrap_or((0, 0));
-                    app.press = Some(Press {
-                        start: app.mouse,
-                        last: app.mouse,
-                        win: (wp.x, wp.y),
-                        off: ((app.mouse.0 * sf) as i32, (app.mouse.1 * sf) as i32),
-                        gstart,
-                        dragging: false,
-                    });
+                    if app.move_mode.take().is_some() {
+                        // Click lands the pet after a tray "Move".
+                        app.fence_rest = None;
+                        save_state(app.window.as_deref(), app.scale, &app.character);
+                    } else {
+                        let wp = app.window.as_ref().and_then(|w| w.outer_position().ok()).unwrap_or(PhysicalPosition::new(0, 0));
+                        let sf = app.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0);
+                        let gstart = app.shaper.query_pointer().map(|(x, y, _)| (x, y)).unwrap_or((0, 0));
+                        app.press = Some(Press {
+                            start: app.mouse,
+                            last: app.mouse,
+                            win: (wp.x, wp.y),
+                            off: ((app.mouse.0 * sf) as i32, (app.mouse.1 * sf) as i32),
+                            gstart,
+                            dragging: false,
+                        });
+                    }
                 }
                 WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
                     if let Some(pr) = app.press.take() {
@@ -1308,12 +1436,82 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
+                // Tray "Move": the window follows the global pointer until
+                // the next click lands it. Reuses the drag infrastructure:
+                // the same Shaper::query_pointer polling as left-drag.
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                if let Some(armed) = app.move_mode {
+                    match app.shaper.query_pointer() {
+                        Some((_, _, true)) if now.duration_since(armed) > Duration::from_millis(250) => {
+                            // The next click lands the pet: stop following
+                            // and re-home the fence anchor to the new spot.
+                            app.move_mode = None;
+                            app.fence_rest = None;
+                            save_state(app.window.as_deref(), app.scale, &app.character);
+                        }
+                        Some((gx, gy, false)) => {
+                            if let Some(w) = &app.window {
+                                let (ww, wh) = {
+                                    let s = w.outer_size();
+                                    (s.width as i32, s.height as i32)
+                                };
+                                let (nx, ny) = (gx - ww / 2, gy - wh / 2);
+                                let _ = w.set_outer_position(Position::Physical(
+                                    PhysicalPosition::new(nx, ny),
+                                ));
+                                app.walk_x = nx as f64;
+                            }
+                            changed = true;
+                        }
+                        _ => {}
+                    }
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+                if let Some(armed) = app.move_mode {
+                    // Fallback: follow via the window-relative cursor
+                    // position (only known while over the pet); a click on
+                    // the pet lands it, the pointer leaving ends the move.
+                    let follow = app.window.as_ref().and_then(|w| {
+                        let c = w.cursor_position().ok()?;
+                        let p = w.outer_position().ok()?;
+                        let s = w.outer_size();
+                        Some((
+                            p.x + c.x as i32 - s.width as i32 / 2,
+                            p.y + c.y as i32 - s.height as i32 / 2,
+                        ))
+                    });
+                    match follow {
+                        Some((nx, ny)) => {
+                            if let Some(w) = &app.window {
+                                let _ = w.set_outer_position(Position::Physical(
+                                    PhysicalPosition::new(nx, ny),
+                                ));
+                                if let Ok(p) = w.outer_position() {
+                                    app.walk_x = p.x as f64;
+                                }
+                            }
+                            changed = true;
+                        }
+                        None if now.duration_since(armed) > Duration::from_millis(500) => {
+                            app.move_mode = None;
+                            app.fence_rest = None;
+                            save_state(app.window.as_deref(), app.scale, &app.character);
+                        }
+                        None => {}
+                    }
+                }
                 let dragging = app.press.as_ref().map_or(false, |p| p.dragging);
-                if !app.menu_open && !dragging && (app.pet.walk_dir() != 0 || app.pet.fence().is_some()) {
+                if !app.menu_open
+                    && !dragging
+                    && app.move_mode.is_none()
+                    && (app.pet.walk_dir() != 0 || app.pet.fence().is_some())
+                {
                     app.apply_walk(now);
                     changed = true;
                 }
-                app.ensure_visible(now);
+                if app.move_mode.is_none() {
+                    app.ensure_visible(now);
+                }
                 // Blank inter-scene gap: hide the window instead of showing
                 // an empty (black without compositor) box — the original
                 // deskmate simply left the screen between scenes.
@@ -1406,4 +1604,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     run_result?;
     Ok(())
+}
+
+#[cfg(test)]
+mod walk_tests {
+    use super::clamp_rest;
+
+    /// Work area like a 1920x1080 screen with a 40 px taskbar.
+    const WA: (i32, i32, i32, i32) = (0, 0, 1920, 1040);
+
+    #[test]
+    fn rest_inside_work_area_untouched() {
+        assert_eq!(clamp_rest(500, 300, 200, 400, WA), (500, 300));
+    }
+
+    #[test]
+    fn rest_clamped_into_work_area() {
+        // Hanging off the right/bottom edges (still >= 2/3 visible at the
+        // clamped point): pulled fully inside the work area.
+        assert_eq!(clamp_rest(1850, 900, 200, 400, WA), (1720, 640));
+    }
+
+    #[test]
+    fn rest_recentered_when_mostly_invisible() {
+        // Sprite wider/taller than the work area: even clamped, less than
+        // 2/3 of it is visible -> recenter in the work area (§2).
+        assert_eq!(clamp_rest(0, 0, 3000, 3000, WA), (-540, -980));
+    }
 }

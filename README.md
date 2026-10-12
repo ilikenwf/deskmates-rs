@@ -28,6 +28,49 @@ to the Oska store, and shipped a demo that gated characters/scenes behind
 
 All of the above are simply absent here.
 
+## Reversed from Sprite.exe
+
+The engine behavior mirrors the original `Sprite.exe`, reverse-engineered
+with radare2 + Ghidra (every claim address-backed in
+[`analysis/PLAYER_RE.md`](analysis/PLAYER_RE.md)):
+
+- **100 ms frame tick.** No Win32 timers anywhere: the original paced
+  frames at `1000/fps` ms (fps = 10) in a `MsgWaitForMultipleObjects` +
+  `GetTickCount` deadline loop. `pet.rs` ticks at the same 100 ms/frame.
+- **Random-def-per-completion speech cadence.** Orphaned `dialog_*` defs
+  (ambient voice lines) were fired by the script-completion handler
+  picking one uniform-random def (`_rand() % N`, reshuffle-swap) from the
+  whole def table each time a script finished — no dedicated timer. Here
+  the `dialog_*` defs ride the same shuffle-bag as the animation scenes,
+  with the Gold-upgrade nag excluded (the `no_all_list.txt` analogue).
+  Entry speech (`S_Deskmate_Enter`'s `{dialog_hi|dialog_hi_baby%2|…}`)
+  is the same weighted `%weight` pick, resolved by `faz::resolve_choices`.
+- **Fence grammar + walk speed.** `fence_*` defs are
+  `[dx,dy]<n>{l,r,c}<n>{t,b,m}` tokens: a signed int16 delta applied per
+  100 ms frame tick (`[200,0]` = 200 px/frame = **2000 px/s**) plus an
+  anchor point measured in pixels from screen edges; `fence_home` is the
+  work area inset 1, and rest positions clamp into the work area with a
+  re-center when < 2/3 of the sprite would be visible. `main.rs`
+  (`work_area`/`clamp_rest`/`apply_walk`) implements exactly this, using
+  the EWMH `_NET_WORKAREA` for the work area.
+- **Transparency.** The original used `SetLayeredWindowAttributes` with a
+  pure-black **color key** (LWA_COLORKEY, no alpha) over a black-filled
+  window. This clone renders per-pixel alpha instead — cleaner on modern
+  compositors — plus XShape input/bounding clipping on bare X11.
+- **Sound.** `!name` tokens were fire-and-forget `waveOutWrite` calls with
+  **one active sound slot** (a new sound replaces the current one; frames
+  never sync to audio). `audio.rs` plays each ` !name` immediately and
+  never blocks the frame loop; the WAV cache is per character, rebound on
+  every character switch.
+- **Telemetry / adware: none of it exists here.** The original Manager.exe
+  wrote the `HKCU\...\Run\DeskMateAutoUpdate` autorun value, dropped
+  Startup-folder `.LNK`s (" DeskMate.LNK", "DeskMates 2005.LNK", …),
+  dropped and executed `%TEMP%\RegisterDeskMate.exe`, and built
+  `WWWParams` + `Rand=%u` tracking URLs for browser launches
+  (full inventory: PLAYER_RE §6). This binary has no registry writes, no
+  autorun, no dropped helpers, and no network code outside the opt-in
+  chat endpoint.
+
 ## What's here
 
 ```
@@ -113,5 +156,6 @@ the `assets/` tree. Engine code in `src/` and `analysis/` is MIT.
 - [x] Adults-only scene gate (Settings checkbox, default off)
 - [x] Original FAZ assets loaded natively (`.bin.gz`, no PNG dumps)
 - [x] 3D characters (Tahni3D, Kahli3D) — see `deskmates3d-rs`
-- The original payload contains no audio files (verified against the
-      installer manifest), so the pet is silent by design.
+- Sound effects and voice lines play from
+      `assets/characters/<name>/sounds/*.wav.gz` (extracted from the
+      original `DeskMate.WAS` archive), rebound per character on switch.

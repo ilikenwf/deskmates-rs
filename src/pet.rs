@@ -88,12 +88,6 @@ pub struct Pet {
     gap_phase: u8,
     /// Debug (`--scene NAME`): loop one scene forever, no random pool.
     pub scene_loop: Option<String>,
-    /// Ambient random speech: the orphaned `dialog_*` defs. The FAS
-    /// scripts never reference them; the original player fired them
-    /// periodically as random conversation.
-    dialogs: Vec<String>,
-    /// When to fire the next ambient line.
-    talk_at: Option<Instant>,
     /// Bubble text for a fired ambient line (host consumes via take_talk).
     pending_talk: Option<String>,
 }
@@ -106,8 +100,10 @@ const REACTIONS: &[&str] = &[
     "balloons", "rubber_duck",
 ];
 
+/// The original ticked at `1000/fps` ms with fps = 10: **100 ms per
+/// frame** (PLAYER_RE §1). `speed` is the `all_slow`/`all_fast` modifier.
 fn frame_dur_for(speed: f64) -> Duration {
-    Duration::from_millis((90.0 / speed) as u64)
+    Duration::from_millis((100.0 / speed) as u64)
 }
 
 /// `dialog_i_can_kick_butt` -> `I can kick butt`: bubble text for an
@@ -130,21 +126,6 @@ impl Pet {
                 entries.iter().find(|(s, _)| s == r).cloned().map(|(s, e)| (s, e))
             })
             .collect();
-        let mut dialogs: Vec<String> = ["touch", "common"]
-            .into_iter()
-            .filter_map(|sn| scenes.scenes.get(sn))
-            .flat_map(|s| {
-                s.raw
-                    .keys()
-                    .filter(|k| k.starts_with("dialog_"))
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
-            // The Gold-upgrade nag voice: adware, never ambient chatter.
-            .filter(|k| k != "dialog_buy_me_now")
-            .collect();
-        dialogs.sort();
-        dialogs.dedup();
         let mut pet = Pet {
             scenes,
             entries,
@@ -163,10 +144,6 @@ impl Pet {
             interstitial: Vec::new(),
             gap_phase: 0,
             scene_loop: None,
-            dialogs,
-            talk_at: Some(
-                Instant::now() + Duration::from_secs(45 + rand::rng().random_range(0..60)),
-            ),
             pending_talk: None,
         };
         pet.start_random();
@@ -194,13 +171,39 @@ impl Pet {
         self.pending_talk.take()
     }
 
-    /// Random-pool of entry scenes minus adults-only ones unless enabled.
+    /// Random-pool of entry scenes minus adults-only ones unless enabled,
+    /// plus the ambient `dialog_*` defs: the original had **no speech
+    /// timer** — every completed script cycle drew one random def from
+    /// the whole table (§1), so the voice lines ride the same shuffle-bag
+    /// as the animations and fire once per cycle by pool share.
     fn pool(scenes: &Scenes, adult: bool) -> Vec<(String, String)> {
-        scenes
+        let mut v: Vec<(String, String)> = scenes
             .all_entries()
             .into_iter()
             .filter(|(s, _)| adult || !crate::adult::is_adult(s))
-            .collect()
+            .collect();
+        v.extend(Self::dialog_defs(scenes));
+        v
+    }
+
+    /// Orphaned `dialog_*` defs (ambient voice lines) as (scene, def)
+    /// pool entries, minus the Gold-upgrade nag voice (adware, never
+    /// ambient chatter — the `no_all_list.txt` exclusion analogue).
+    fn dialog_defs(scenes: &Scenes) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = ["touch", "common"]
+            .into_iter()
+            .filter_map(|sn| scenes.scenes.get(sn).map(|s| (sn, s)))
+            .flat_map(|(sn, s)| {
+                s.raw
+                    .keys()
+                    .filter(|k| k.starts_with("dialog_"))
+                    .map(move |k| (sn.to_string(), k.clone()))
+            })
+            .filter(|(_, k)| k != "dialog_buy_me_now")
+            .collect();
+        v.sort();
+        v.dedup();
+        v
     }
 
     /// Toggle adults-only scenes; takes effect from the next scene onward.
@@ -353,49 +356,30 @@ impl Pet {
             if let Some(at) = self.next_at {
                 if now >= at {
                     self.next_at = None;
-                    // Ambient speech: fire one orphaned dialog_* def in
-                    // the gap (the original player's random conversation
-                    // timer). Skipped while --scene pins a debug loop.
-                    let mut talked = false;
-                    if self.scene_loop.is_none() {
-                        if let Some(t) = self.talk_at {
-                            if now >= t && !self.dialogs.is_empty() {
-                                if let Some(d) = self.dialogs.choose(&mut rand::rng()).cloned() {
-                                    self.talk_at = Some(
-                                        now + Duration::from_secs(60 + rand::rng().random_range(0..120)),
-                                    );
-                                    self.pending_talk = Some(humanize_dialog(&d));
-                                    self.play("touch", &d);
-                                    if self.stack.is_empty() {
-                                        self.start_random();
-                                    }
-                                    talked = true;
-                                }
-                            }
+                    // One random def per completed cycle (§1): the bag
+                    // over `entries` already contains the ambient
+                    // `dialog_*` defs, so the next draw may be a voice
+                    // line — no separate speech timer.
+                    if let Some(s) = self.scene_loop.clone() {
+                        if !self.play_named(&s) {
+                            self.start_random();
                         }
-                    }
-                    if !talked {
-                        if let Some(s) = self.scene_loop.clone() {
-                            if !self.play_named(&s) {
-                                self.start_random();
-                            }
-                        } else if self.gap_phase == 0 && !self.interstitial.is_empty() {
-                            // User-classified interstitial scenes fill the gap
-                            // (classify candidates with --scenes/--scene NAME);
-                            // the filler ending re-arms the gap for a real
-                            // scene via gap_phase.
-                            self.gap_phase = 1;
-                            let s = self.interstitial
-                                [rand::rng().random_range(0..self.interstitial.len())]
-                                .clone();
-                            if !self.play_named(&s) {
-                                self.gap_phase = 0;
-                                self.start_random();
-                            }
-                        } else {
+                    } else if self.gap_phase == 0 && !self.interstitial.is_empty() {
+                        // User-classified interstitial scenes fill the gap
+                        // (classify candidates with --scenes/--scene NAME);
+                        // the filler ending re-arms the gap for a real
+                        // scene via gap_phase.
+                        self.gap_phase = 1;
+                        let s = self.interstitial
+                            [rand::rng().random_range(0..self.interstitial.len())]
+                            .clone();
+                        if !self.play_named(&s) {
                             self.gap_phase = 0;
                             self.start_random();
                         }
+                    } else {
+                        self.gap_phase = 0;
+                        self.start_random();
                     }
                     changed = true;
                 }
@@ -441,6 +425,11 @@ impl Pet {
         }
         self.frame_at = Instant::now();
         self.frame_dur = frame_dur_for(self.speed);
+        // A `dialog_*` def drawn from the pool: bubble text (the FAS
+        // stores only the sound name).
+        if entry.starts_with("dialog_") && entry != "dialog_buy_me_now" {
+            self.pending_talk = Some(humanize_dialog(entry));
+        }
     }
 
     fn steps_for(&self, scene: &str, name: &str) -> Option<Vec<Step>> {
@@ -499,7 +488,11 @@ impl Pet {
                     // keeps its last frame through the idle gap until the
                     // next sequence's first frame replaces it. Clearing
                     // here was the inter-scene blink.
-                    self.next_at = Some(now + Duration::from_millis(600 + rand::rng().random_range(0..2500)));
+                    //
+                    // §1/§5 inter-scene gap: the `pause` def holds 500 ms
+                    // (`0000*5` at 10 fps) before the next weighted-random
+                    // pick — keep the hold at ~500 ms, not longer.
+                    self.next_at = Some(now + Duration::from_millis(500 + rand::rng().random_range(0..250)));
                     return false;
                 }
                 continue;
@@ -528,12 +521,17 @@ impl Pet {
                 Step::End | Step::EndPause => {
                     self.stack.clear();
                     self.walk_dir = 0;
-                    let gap = if matches!(step, Step::EndPause) { 1500 } else { 400 };
-                    self.next_at = Some(now + Duration::from_millis(gap + rand::rng().random_range(0..1500)));
+                    // §1/§5: ~500 ms `pause` hold, then the next draw.
+                    self.next_at = Some(now + Duration::from_millis(500 + rand::rng().random_range(0..250)));
                     return false;
                 }
                 Step::Sub { scene, name, rep } => {
                     self.frame_dur = frame_dur_for(self.speed);
+                    // A weighted `{dialog_hi|…}` list resolved to a dialog
+                    // def: voice line + bubble text.
+                    if name.starts_with("dialog_") && name != "dialog_buy_me_now" {
+                        self.pending_talk = Some(humanize_dialog(&name));
+                    }
                     match name.as_str() {
                         "all" => { self.speed = 1.0; continue; }
                         "all_slow" => { self.speed = 0.65; self.frame_dur = frame_dur_for(self.speed); continue; }
@@ -654,5 +652,20 @@ mod gating_tests {
                 );
             }
         }
+    }
+
+    /// Ambient `dialog_*` defs ride the random scene pool: the original
+    /// fired them with the one-random-def-per-completed-script draw (§1),
+    /// not a timer. The Gold-upgrade nag stays excluded from the pool.
+    #[test]
+    fn dialog_defs_join_the_pool() {
+        let sc = crate::scenes::Scenes::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/characters/tahni"),
+        )
+        .unwrap();
+        let pool = Pet::pool(&sc, false);
+        let n = pool.iter().filter(|(_, e)| e.starts_with("dialog_")).count();
+        assert!(n >= 10, "expected ambient dialog defs in the pool, got {n}");
+        assert!(!pool.iter().any(|(_, e)| e == "dialog_buy_me_now"));
     }
 }

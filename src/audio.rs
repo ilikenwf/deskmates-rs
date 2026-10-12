@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use parking_lot::Mutex;
 
 pub struct Audio {
     // Kept alive for the process lifetime; dropping it closes the device.
@@ -28,6 +28,24 @@ impl Audio {
         }
     }
 
+    /// Load `NAME.wav.gz` (gunzipped) through the per-instance cache.
+    /// The cache lives inside one `Audio`, so rebuilding `Audio` for a new
+    /// character (see `App::switch_character`) keys the WAV cache per
+    /// character: same-named waves (`LAND`, `SWOOSH_A`, …) never leak
+    /// across characters.
+    fn load(&self, key: &str) -> Option<std::sync::Arc<Vec<u8>>> {
+        let mut cache = self.cache.lock();
+        if let Some(b) = cache.get(key) {
+            return Some(b.clone());
+        }
+        let raw = std::fs::read(self.dir.join(format!("{key}.wav.gz"))).ok()?;
+        let mut wav = Vec::new();
+        let _ = flate2::read::GzDecoder::new(Cursor::new(raw)).read_to_end(&mut wav);
+        let wav = std::sync::Arc::new(wav);
+        cache.insert(key.to_string(), wav.clone());
+        Some(wav)
+    }
+
     /// Play `NAME.wav.gz` from the character's sounds dir (fire-and-forget;
     /// overlapping sounds mix on the device).
     pub fn play(&self, name: &str) {
@@ -37,29 +55,9 @@ impl Audio {
         if key.is_empty() {
             return;
         }
-        let bytes = {
-            let mut cache = self.cache.lock().unwrap();
-            if let Some(b) = cache.get(&key) {
-                b.clone()
-            } else {
-                let raw = std::fs::read(self.dir.join(format!("{key}.wav.gz"))).ok();
-                let wav = raw.map(|r| {
-                    let mut w = Vec::new();
-                    let _ = flate2::read::GzDecoder::new(Cursor::new(r)).read_to_end(&mut w);
-                    w
-                });
-                match wav {
-                    Some(w) => {
-                        let w = std::sync::Arc::new(w);
-                        cache.insert(key, w.clone());
-                        w
-                    }
-                    None => {
-                        if std::env::var("DESK_AUDIO_DEBUG").is_ok() { eprintln!("SND MISS {key}"); }
-                        return;
-                    }
-                }
-            }
+        let Some(bytes) = self.load(&key) else {
+            if std::env::var("DESK_AUDIO_DEBUG").is_ok() { eprintln!("SND MISS {key}"); }
+            return;
         };
         use rodio::source::Source;
         if let Ok(src) = rodio::Decoder::new(Cursor::new(bytes.as_ref().clone())) {
@@ -100,6 +98,27 @@ mod tests {
             }
         }
         assert!(checked > 0);
+    }
+
+    /// The WAV cache is per `Audio` instance and `App::switch_character`
+    /// rebuilds `Audio` with the new character's sounds dir, so
+    /// same-named waves must never leak across characters.
+    /// `ASTALAVISTA_BABY` and `LAND` exist for both tahni and kahli with
+    /// different content.
+    #[test]
+    fn cache_is_per_character() {
+        let chars = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/characters");
+        let tahni = Audio::new(chars.join("tahni/sounds"));
+        let kahli = Audio::new(chars.join("kahli/sounds"));
+        for name in ["ASTALAVISTA_BABY", "LAND"] {
+            let a = tahni.load(name).unwrap_or_else(|| panic!("tahni {name} missing"));
+            let b = kahli.load(name).unwrap_or_else(|| panic!("kahli {name} missing"));
+            assert!(!a.is_empty() && !b.is_empty());
+            assert_ne!(a, b, "{name} leaked across characters");
+        }
+        // Cache-hit path returns the same bytes as the cold read.
+        let warm = tahni.load("ASTALAVISTA_BABY").unwrap();
+        assert_eq!(&*warm, &*tahni.load("ASTALAVISTA_BABY").unwrap());
     }
 }
 
