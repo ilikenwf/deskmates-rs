@@ -52,12 +52,19 @@ pub struct Config {
     /// (classify with --scenes / --scene NAME).
     #[serde(default)]
     pub interstitial: Vec<String>,
+    /// Pet may roam: walk/fence scenes move the window (settings checkbox).
+    #[serde(default = "default_true")]
+    pub walk: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { scale: 1.0, x: None, y: None, character: "tahni".into(), agent_endpoint: String::new(), agent_key: String::new(), agent_model: String::new(), adult: false, interstitial: Vec::new() }
+        Config { scale: 1.0, x: None, y: None, character: "tahni".into(), agent_endpoint: String::new(), agent_key: String::new(), agent_model: String::new(), adult: false, interstitial: Vec::new(), walk: true }
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn config_path() -> Option<std::path::PathBuf> {
@@ -226,12 +233,43 @@ mod xshape {
                 r.mask.contains(x11rb::protocol::xproto::KeyButMask::BUTTON1),
             ))
         }
+        /// Drop the pet window from the taskbar/dash: add
+        /// `_NET_WM_STATE_SKIP_TASKBAR` (property + client message, so WMs
+        /// that poll and WMs that listen both pick it up). Works on plain
+        /// X11 and XWayland — KWin reads EWMH on XWayland windows; native
+        /// Wayland has no such protocol, one more reason the app forces the
+        /// X11 backend. The tray icon is the entry point instead.
+        pub fn set_skip_taskbar(&mut self) {
+            let Some((conn, screen)) = &self.conn else { return };
+            let Some(win) = self.window else { return };
+            let root = conn.setup().roots[*screen].root;
+            use x11rb::protocol::xproto::{ClientMessageEvent, EventMask, PropMode};
+            use x11rb::wrapper::ConnectionExt as PropExt;
+            let r = (|| -> Result<(), x11rb::errors::ReplyOrIdError> {
+                let state = conn.intern_atom(false, b"_NET_WM_STATE")?.reply()?.atom;
+                let skip = conn.intern_atom(false, b"_NET_WM_STATE_SKIP_TASKBAR")?.reply()?.atom;
+                conn.change_property32(PropMode::REPLACE, win, state, state, &[skip])?;
+                let msg = ClientMessageEvent::new(32, win, state, [1u32, skip, 1, 0, 0]);
+                conn.send_event(
+                    false,
+                    root,
+                    EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT,
+                    msg,
+                )?;
+                conn.flush()?;
+                Ok(())
+            })();
+            let _ = r;
+        }
         /// Clip the window (bounding + input) to the opaque pixels of the
         /// straight-alpha RGBA `canvas` (stride 4, `w`x`h`).
         pub fn apply(&mut self, w: u32, h: u32, canvas: &[u8]) {
             self.since_resolve += 1;
             if self.window.is_none() || self.since_resolve > 120 {
                 self.resolve();
+                if self.window.is_some() {
+                    self.set_skip_taskbar();
+                }
             }
             let (Some((conn, _)), Some(win)) = (self.conn.as_ref(), self.window) else {
                 return;
@@ -329,8 +367,8 @@ fn make_tray(display: &str) -> Option<tray_icon::TrayIcon> {
     // Full action mirror of the in-window right-click menu: the tray is the
     // hitbox-proof entry point (the pet window is tiny and shaped).
     let mv = MenuItem::with_id("move", "Move", true, None);
-    let touch = MenuItem::with_id("touch", "Touch her", true, None);
-    let ask = MenuItem::with_id("ask", format!("Ask {}…", display), true, None);
+    let touch = MenuItem::with_id("touch", "Touch", true, None);
+    let ask = MenuItem::with_id("ask", "Ask…", true, None);
     let next = MenuItem::with_id("next", "Next scene", true, None);
     let settings = MenuItem::with_id("settings", "Settings…", true, None);
     let about = MenuItem::with_id("about", "About", true, None);
@@ -370,10 +408,9 @@ struct MenuItem {
 }
 
 const MENU: &[MenuItem] = &[
-    MenuItem { label: "Touch her" },
-    // `{CHAR}` is replaced with the active character's display name at
-    // draw time, so the label follows switch_character.
-    MenuItem { label: "Ask {CHAR}…" },
+    MenuItem { label: "Touch" },
+    // Plain "Ask…" for every character (the tray mirrors it).
+    MenuItem { label: "Ask…" },
     MenuItem { label: "Next scene" },
     MenuItem { label: "Next character" },
     MenuItem { label: "Settings…" },
@@ -407,6 +444,12 @@ struct App {
     bubble: Option<(String, Instant)>,
     ask_mtime: Option<std::time::SystemTime>,
     cfg_mtime: Option<std::time::SystemTime>,
+    /// Config toggle: pet may roam (walk/fence scenes move the window).
+    walk_enabled: bool,
+    /// User-idle state (MIT-SCREEN-SAVER): the original gated its actions
+    /// on user inactivity; we gate roaming on it too.
+    user_idle: bool,
+    last_idle_query: Instant,
     tray: Option<tray_icon::TrayIcon>,
     last_move: Instant,
     /// Fractional window x for smooth walking.
@@ -821,8 +864,8 @@ impl App {
             if x >= *mx as f64 && x < (*mx + *mw) as f64 && y >= *my as f64 && y < (*my + *mh) as f64 {
                 self.menu_open = false;
                 match MENU[*i].label {
-                    "Touch her" => self.pet.touch(),
-                    "Ask {CHAR}…" => {
+                    "Touch" => self.pet.touch(),
+                    "Ask…" => {
                         if self.agent.enabled() {
                             fork_child("--ask-ui");
                         } else {
@@ -1081,6 +1124,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         bubble: None,
         ask_mtime: ask_mtime(),
         cfg_mtime: cfg_mtime(),
+        walk_enabled: cfg.walk,
+        user_idle: true,
+        last_idle_query: Instant::now(),
         window: None,
         size: (1, 1),
         mouse: (0.0, 0.0),
@@ -1501,9 +1547,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 let dragging = app.press.as_ref().map_or(false, |p| p.dragging);
+                // User-idle gate: no roaming while the user types/moves
+                // (Sprite.exe measured time since last input the same way).
+                if app.last_idle_query.elapsed() >= Duration::from_secs(1) {
+                    app.last_idle_query = now;
+                    app.user_idle = user_idle_secs().map(|s| s >= 5).unwrap_or(true);
+                }
                 if !app.menu_open
                     && !dragging
                     && app.move_mode.is_none()
+                    && app.walk_enabled
+                    && app.user_idle
                     && (app.pet.walk_dir() != 0 || app.pet.fence().is_some())
                 {
                     app.apply_walk(now);
@@ -1586,6 +1640,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         app.agent.key = c.agent_key;
                         app.agent.model = c.agent_model;
                         app.pet.set_adult(c.adult);
+                        app.walk_enabled = c.walk;
                     }
                 }
                 // Bubble expiry needs one final redraw to clear.
@@ -1631,4 +1686,29 @@ mod walk_tests {
         // 2/3 of it is visible -> recenter in the work area (§2).
         assert_eq!(clamp_rest(0, 0, 3000, 3000, WA), (-540, -980));
     }
+}
+
+/// Seconds since the user last touched mouse/keyboard, via the X11
+/// MIT-SCREEN-SAVER extension (plain X11 and XWayland sessions). `None`
+/// where no query exists (native Wayland, Windows, macOS): roaming then
+/// depends only on the settings toggle.
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+fn user_idle_secs() -> Option<u64> {
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::screensaver::ConnectionExt as _;
+    thread_local! {
+        static SS_CONN: Option<(x11rb::rust_connection::RustConnection, usize)> =
+            x11rb::connect(None).ok();
+    }
+    SS_CONN.with(|c| {
+        let (conn, screen) = c.as_ref()?;
+        let root = conn.setup().roots[*screen].root;
+        let info = conn.screensaver_query_info(root).ok()?.reply().ok()?;
+        Some(info.ms_since_user_input as u64 / 1000)
+    })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+fn user_idle_secs() -> Option<u64> {
+    None
 }

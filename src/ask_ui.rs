@@ -21,7 +21,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes};
 
 const W: u32 = 460;
-const H: u32 = 270;
+const H: u32 = 300;
 const FIELDS: [&str; 3] = ["API endpoint (blank = offline)", "API key", "Model"];
 
 struct Ui {
@@ -41,6 +41,9 @@ struct Ui {
     /// Settings mode: adults-only content checkbox.
     adult: bool,
     adult_rect: (i32, i32, i32, i32),
+    /// Settings mode: roaming (walk/fence window movement) checkbox.
+    walk: bool,
+    walk_rect: (i32, i32, i32, i32),
 }
 
 impl Ui {
@@ -96,6 +99,7 @@ impl Ui {
         cfg.agent_key = self.fields[1].trim().to_string();
         cfg.agent_model = self.fields[2].trim().to_string();
         cfg.adult = self.adult;
+        cfg.walk = self.walk;
         crate::save_config(&cfg);
         self.status = "Saved. Tahni reloads this automatically.".to_string();
     }
@@ -114,6 +118,11 @@ impl Ui {
                 self.adult = !self.adult;
                 return;
             }
+        }
+        let (rx, ry, rw, rh) = self.walk_rect;
+        if rw > 0 && x >= rx as f64 && x < (rx + rw) as f64 && y >= ry as f64 && y < (ry + rh) as f64 {
+            self.walk = !self.walk;
+            return;
         }
         let (rx, ry, rw, rh) = self.save_rect;
         if x >= rx as f64 && x < (rx + rw) as f64 && y >= ry as f64 && y < (ry + rh) as f64 {
@@ -185,6 +194,16 @@ impl Ui {
             }
             draw_text(&mut canvas, w, h, &self.font, "Show adults-only scenes (nudity)", (bx + bs) as f32 + 8.0 * s, by as f32 + bs as f32 * 0.78, scale, [0x33, 0x33, 0x33, 255]);
             y += lh * 1.7;
+            let (bx, by) = ((14.0 * s) as i32, (y - lh * 0.35) as i32);
+            self.walk_rect = (bx, by - 4, (w as f32 - 28.0 * s) as i32, bs + 8);
+            fill_rect(&mut canvas, w, h, bx, by, bs, bs, [0xFF, 0xFF, 0xFF, 255]);
+            stroke_rect(&mut canvas, w, h, bx, by, bs, bs, [0x99, 0x99, 0x99, 255]);
+            if self.walk {
+                let q = bs / 4;
+                fill_rect(&mut canvas, w, h, bx + q, by + q, q * 2 + 1, q * 2 + 1, [0xB0, 0x30, 0x60, 255]);
+            }
+            draw_text(&mut canvas, w, h, &self.font, "Walk around the screen (pauses while you type)", (bx + bs) as f32 + 8.0 * s, by as f32 + bs as f32 * 0.78, scale, [0x33, 0x33, 0x33, 255]);
+            y += lh * 1.7;
         }
         // Save / Ask button.
         let (bx, by, bw, bh) = ((14.0 * s) as i32, y as i32, (110.0 * s) as i32, (lh * 1.7) as i32);
@@ -236,6 +255,8 @@ pub fn run(ask: bool) -> Result<(), Box<dyn std::error::Error>> {
             [cfg.agent_endpoint, cfg.agent_key, cfg.agent_model]
         },
         adult: cfg.adult,
+        walk: cfg.walk,
+        walk_rect: (0, 0, 0, 0),
         adult_rect: (0, 0, 0, 0),
         sel: 0,
         caret: 0,

@@ -40,7 +40,7 @@ flate2 = "1"
 # libappindicator tray support pumps the default GMainContext.
 gtk = "0.18"
 # XShape window clipping (transparency without a compositor).
-x11rb = { version = "0.13", features = ["shape"] }
+x11rb = { version = "0.13", features = ["shape", "screensaver"] }
 
 [profile.release]
 opt-level = 2
