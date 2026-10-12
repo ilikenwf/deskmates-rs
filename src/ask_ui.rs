@@ -44,6 +44,13 @@ struct Ui {
     /// Settings mode: roaming (walk/fence window movement) checkbox.
     walk: bool,
     walk_rect: (i32, i32, i32, i32),
+    /// Selection anchor (char index) for shift-selection / Ctrl+A.
+    anchor: Option<usize>,
+    /// Live modifier state (winit 0.30: delivered via ModifiersChanged).
+    mods: winit::event::Modifiers,
+    /// Kept alive so we remain the X11 CLIPBOARD selection owner after
+    /// set_text (a dropped arboard Clipboard stops serving requests).
+    clip: Option<arboard::Clipboard>,
 }
 
 impl Ui {
@@ -60,6 +67,7 @@ impl Ui {
     }
 
     fn insert(&mut self, c: char) {
+        self.delete_selection();
         let n = self.fields[self.sel].chars().count();
         if n < 300 {
             let mut ch: Vec<char> = self.fields[self.sel].chars().collect();
@@ -70,12 +78,61 @@ impl Ui {
     }
 
     fn backspace(&mut self) {
+        if self.sel_range().is_some() {
+            self.delete_selection();
+            return;
+        }
         if self.caret > 0 {
             let mut ch: Vec<char> = self.fields[self.sel].chars().collect();
             ch.remove(self.caret - 1);
             self.fields[self.sel] = ch.into_iter().collect();
             self.caret -= 1;
         }
+    }
+
+    fn sel_range(&self) -> Option<(usize, usize)> {
+        let a = self.anchor?;
+        if a == self.caret {
+            None
+        } else {
+            Some((a.min(self.caret), a.max(self.caret)))
+        }
+    }
+
+    /// Selected text, or the whole field when nothing is selected.
+    fn copy_text(&self) -> String {
+        match self.sel_range() {
+            Some((a, b)) => self.fields[self.sel].chars().skip(a).take(b - a).collect(),
+            None => self.fields[self.sel].clone(),
+        }
+    }
+
+    fn delete_selection(&mut self) {
+        if let Some((a, b)) = self.sel_range() {
+            let mut ch: Vec<char> = self.fields[self.sel].chars().collect();
+            ch.drain(a..b);
+            self.fields[self.sel] = ch.into_iter().collect();
+            self.caret = a;
+        }
+        self.anchor = None;
+    }
+
+    fn paste(&mut self, s: &str) {
+        self.delete_selection();
+        for c in s.chars().filter(|c| !c.is_control()).take(4096) {
+            self.insert(c);
+        }
+    }
+
+    fn move_caret(&mut self, to: usize, shift: bool) {
+        if shift {
+            if self.anchor.is_none() {
+                self.anchor = Some(self.caret);
+            }
+        } else {
+            self.anchor = None;
+        }
+        self.caret = to;
     }
 
     fn save(&mut self) {
@@ -109,6 +166,7 @@ impl Ui {
             if x >= *rx as f64 && x < (rx + rw) as f64 && y >= *ry as f64 && y < (ry + rh) as f64 {
                 self.sel = i;
                 self.caret = self.fields[i].chars().count();
+                self.anchor = None;
                 return;
             }
         }
@@ -171,6 +229,24 @@ impl Ui {
             let border = if i == self.sel { [0xB0, 0x30, 0x60, 255] } else { [0x99, 0x99, 0x99, 255] };
             fill_rect(&mut canvas, w, h, bx, by, bw, bh, fill);
             stroke_rect(&mut canvas, w, h, bx, by, bw, bh, border);
+            if i == self.sel {
+                if let Some((a, b)) = self.sel_range() {
+                    let x_at = |n: usize| -> f32 {
+                        let pre = if i == 1 {
+                            "•".repeat(n.min(8))
+                        } else {
+                            self.fields[i].chars().take(n).collect::<String>()
+                        };
+                        bx as f32 + 6.0 * s + crate::text_width(&self.font, &pre, scale)
+                    };
+                    fill_rect(
+                        &mut canvas, w, h,
+                        x_at(a) as i32, (y - lh * 0.35) as i32,
+                        (x_at(b) - x_at(a)) as i32, (lh * 1.2) as i32,
+                        [0xB0, 0x30, 0x60, 0x55],
+                    );
+                }
+            }
             let shown = self.field_text(i);
             draw_text(&mut canvas, w, h, &self.font, &shown, bx as f32 + 6.0 * s, y + lh * 0.35, scale, [0, 0, 0, 255]);
             if i == self.sel && self.window.as_ref().is_some_and(|w| w.has_focus()) && self.frame_blink() {
@@ -214,7 +290,7 @@ impl Ui {
         draw_text(&mut canvas, w, h, &self.font, &self.status, (bx + bw + 14) as f32, by as f32 + bh as f32 * 0.68, scale, [0x20, 0x60, 0x20, 255]);
         draw_text(
             &mut canvas, w, h, &self.font,
-            if self.ask { "Enter asks. Esc closes." } else { "Click a field to edit. Enter saves. Esc closes." },
+            if self.ask { "Enter asks. Esc closes." } else { "Click a field to edit. Enter saves. Esc closes. Ctrl+A/C/V/X, shift to select." },
             14.0 * s,
             (by + bh) as f32 + lh * 1.3,
             scale,
@@ -260,6 +336,9 @@ pub fn run(ask: bool) -> Result<(), Box<dyn std::error::Error>> {
         adult_rect: (0, 0, 0, 0),
         sel: 0,
         caret: 0,
+        anchor: None,
+        mods: Default::default(),
+        clip: None,
         window: None,
         pixels: None,
         size: (W, if ask { 170 } else { H }),
@@ -329,37 +408,91 @@ pub fn run(ask: bool) -> Result<(), Box<dyn std::error::Error>> {
                 ui.click(x, y);
                 ui.window.as_ref().map(|w| w.request_redraw());
             }
+            WindowEvent::ModifiersChanged(m) => ui.mods = m,
             WindowEvent::KeyboardInput { event: KeyEvent { state: ElementState::Pressed, logical_key, text, .. }, .. } => {
-                match &logical_key {
-                    Key::Named(NamedKey::Escape) => el.exit(),
-                    Key::Named(NamedKey::Enter) => {
-                        ui.save();
-                        el.exit();
-                    }
-                    Key::Named(NamedKey::Tab) => {
-                        ui.sel = (ui.sel + 1) % if ui.ask { 1 } else { 3 };
-                        ui.caret = ui.fields[ui.sel].chars().count();
-                    }
-                    Key::Named(NamedKey::Backspace) => ui.backspace(),
-                    Key::Named(NamedKey::Delete) => {
-                        let mut ch: Vec<char> = ui.fields[ui.sel].chars().collect();
-                        if ui.caret < ch.len() {
-                            ch.remove(ui.caret);
-                            ui.fields[ui.sel] = ch.into_iter().collect();
+                let shift = ui.mods.state().shift_key();
+                let ctrl = ui.mods.state().control_key();
+                if ctrl {
+                    match text.and_then(|t| t.chars().next()).map(|c| c.to_ascii_lowercase()) {
+                        Some('a') => {
+                            ui.anchor = Some(0);
+                            ui.caret = ui.fields[ui.sel].chars().count();
                         }
+                        Some('c') => {
+                            let t = ui.copy_text();
+                            if ui.clip.is_none() {
+                                ui.clip = arboard::Clipboard::new().ok();
+                            }
+                            if let Some(cb) = ui.clip.as_mut() {
+                                let _ = cb.set_text(t);
+                            }
+                        }
+                        Some('x') => {
+                            let t = ui.copy_text();
+                            if ui.clip.is_none() {
+                                ui.clip = arboard::Clipboard::new().ok();
+                            }
+                            if let Some(cb) = ui.clip.as_mut() {
+                                let _ = cb.set_text(t);
+                            }
+                            ui.delete_selection();
+                        }
+                        Some('v') => {
+                            if ui.clip.is_none() {
+                                ui.clip = arboard::Clipboard::new().ok();
+                            }
+                            if let Some(cb) = ui.clip.as_mut() {
+                                if let Ok(t) = cb.get_text() {
+                                    ui.paste(&t);
+                                }
+                            }
+                        }
+                        _ => {}
                     }
-                    Key::Named(NamedKey::ArrowLeft) => ui.caret = ui.caret.saturating_sub(1),
-                    Key::Named(NamedKey::ArrowRight) => {
-                        ui.caret = (ui.caret + 1).min(ui.fields[ui.sel].chars().count())
-                    }
-                    Key::Named(NamedKey::Home) => ui.caret = 0,
-                    Key::Named(NamedKey::End) => ui.caret = ui.fields[ui.sel].chars().count(),
-                    _ => {
-                        if let Some(c) = text
-                            .and_then(|t| t.chars().next())
-                            .filter(|c| c.is_ascii_graphic() || *c == ' ')
-                        {
-                            ui.insert(c);
+                } else {
+                    match &logical_key {
+                        Key::Named(NamedKey::Escape) => el.exit(),
+                        Key::Named(NamedKey::Enter) => {
+                            ui.save();
+                            el.exit();
+                        }
+                        Key::Named(NamedKey::Tab) => {
+                            ui.sel = (ui.sel + 1) % if ui.ask { 1 } else { 3 };
+                            ui.caret = ui.fields[ui.sel].chars().count();
+                            ui.anchor = None;
+                        }
+                        Key::Named(NamedKey::Backspace) => ui.backspace(),
+                        Key::Named(NamedKey::Delete) => {
+                            if ui.sel_range().is_some() {
+                                ui.delete_selection();
+                            } else {
+                                let mut ch: Vec<char> = ui.fields[ui.sel].chars().collect();
+                                if ui.caret < ch.len() {
+                                    ch.remove(ui.caret);
+                                    ui.fields[ui.sel] = ch.into_iter().collect();
+                                }
+                            }
+                        }
+                        Key::Named(NamedKey::ArrowLeft) => {
+                            let t = ui.caret.saturating_sub(1);
+                            ui.move_caret(t, shift);
+                        }
+                        Key::Named(NamedKey::ArrowRight) => {
+                            let t = (ui.caret + 1).min(ui.fields[ui.sel].chars().count());
+                            ui.move_caret(t, shift);
+                        }
+                        Key::Named(NamedKey::Home) => ui.move_caret(0, shift),
+                        Key::Named(NamedKey::End) => {
+                            let t = ui.fields[ui.sel].chars().count();
+                            ui.move_caret(t, shift);
+                        }
+                        _ => {
+                            if let Some(c) = text
+                                .and_then(|t| t.chars().next())
+                                .filter(|c| c.is_ascii_graphic() || *c == ' ')
+                            {
+                                ui.insert(c);
+                            }
                         }
                     }
                 }
