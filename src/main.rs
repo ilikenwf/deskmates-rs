@@ -358,6 +358,8 @@ struct Press {
     last: (f64, f64),
     win: (i32, i32),
     off: (i32, i32),
+    /// Global pointer at press time (X11 drag-start threshold).
+    gstart: (i32, i32),
     dragging: bool,
 }
 
@@ -1099,11 +1101,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                     let wp = app.window.as_ref().and_then(|w| w.outer_position().ok()).unwrap_or(PhysicalPosition::new(0, 0));
                     let sf = app.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0);
+                    let gstart = app.shaper.query_pointer().map(|(x, y, _)| (x, y)).unwrap_or((0, 0));
                     app.press = Some(Press {
                         start: app.mouse,
                         last: app.mouse,
                         win: (wp.x, wp.y),
                         off: ((app.mouse.0 * sf) as i32, (app.mouse.1 * sf) as i32),
+                        gstart,
                         dragging: false,
                     });
                 }
@@ -1157,10 +1161,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // held; a release anywhere (even far outside the tiny
                 // window) ends the drag.
                 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
-                if let Some((off, dragging)) = app.press.as_ref().map(|p| (p.off, p.dragging)) {
-                    if dragging {
-                        match app.shaper.query_pointer() {
-                            Some((gx, gy, true)) => {
+                if let Some((off, gstart, dragging)) =
+                    app.press.as_ref().map(|p| (p.off, p.gstart, p.dragging))
+                {
+                    match app.shaper.query_pointer() {
+                        Some((gx, gy, true)) => {
+                            if dragging {
                                 if let Some(w) = &app.window {
                                     let _ = w.set_outer_position(Position::Physical(
                                         PhysicalPosition::new(gx - off.0, gy - off.1),
@@ -1169,8 +1175,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         app.walk_x = p.x as f64;
                                     }
                                 }
+                            } else if (gx - gstart.0).abs() + (gy - gstart.1).abs() > 6 {
+                                // The pointer warped straight out of the
+                                // window: winit stops sending CursorMoved,
+                                // so the drag must start from the polled
+                                // global position, not window-relative
+                                // motion.
+                                if let Some(p) = &mut app.press {
+                                    p.dragging = true;
+                                }
                             }
-                            Some((_, _, false)) | None => {
+                        }
+                        Some((_, _, false)) | None => {
+                            if dragging {
                                 app.press = None;
                                 save_state(app.window.as_deref(), app.scale, &app.character);
                             }
