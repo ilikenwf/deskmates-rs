@@ -9,6 +9,16 @@ the decompressed stream sizes. FAS files are stored gzip-compressed under
 `assets/characters/<c>/behaviors/`; WAS sounds are split into individual
 8 kHz 16-bit mono WAVs under `assets/characters/<c>/sounds/`.
 
+Newer installers (Maeka.exe) ship their sounds in a second archive,
+`DeskMates.Wa3`, whose `DeskMate.WAS` sibling holds only the SPACER silence
+placeholder. The Wa3 table layout is identical to WAS — [u32 total][u32
+count][(name_off, data_off)*count][names][u32-len-prefixed blocks] — but each
+block is a raw MPEG-2 Layer III stream (22.05 kHz mono, 32 kbps, no RIFF
+header) instead of raw PCM, so blocks are decoded to WAV with ffmpeg. The
+entry names (M001.., T001..) are exactly the ` !name` sound tokens the
+character's scene/FAS scripts reference (email.FAZ -> !M001..M003,
+touch.FAS -> !T001..T011).
+
 Usage: python3 analysis/extract_behaviors.py [character ...]   (default: all)
 """
 import os, re, struct, subprocess, sys, tempfile, zlib, gzip
@@ -60,9 +70,9 @@ def streams(exe, tmp):
     raise RuntimeError(f'no extractor worked for {exe}')
 
 
-def wav_wrap(pcm):
+def wav_wrap(pcm, rate=8000):
     return (b'RIFF' + struct.pack('<I', 36 + len(pcm)) + b'WAVEfmt '
-            + struct.pack('<IHHIIHH', 16, 1, 1, 8000, 16000, 2, 16)
+            + struct.pack('<IHHIIHH', 16, 1, 1, rate, rate * 2, 2, 16)
             + b'data' + struct.pack('<I', len(pcm)) + pcm)
 
 
@@ -75,6 +85,27 @@ def split_was(data):
         name = data[base + no:data.index(b'\x00', base + no)].decode('ascii', 'replace')
         dl = struct.unpack_from('<I', data, base + do)[0]
         out[name] = wav_wrap(data[base + do + 4:base + do + 4 + dl])
+    return out
+
+
+def split_wa3(data):
+    """DeskMates.Wa3: same table as split_was, but each block is a raw
+    MPEG-2 Layer III stream (22.05 kHz mono, 32 kbps) instead of raw PCM —
+    decode each block to PCM with ffmpeg and wrap it as a WAV."""
+    total, count = struct.unpack_from('<II', data, 0)
+    base = 8 + count * 8
+    out = {}
+    for i in range(count):
+        no, do = struct.unpack_from('<II', data, 8 + i * 8)
+        name = data[base + no:data.index(b'\x00', base + no)].decode('ascii', 'replace')
+        dl = struct.unpack_from('<I', data, base + do)[0]
+        p = subprocess.run(
+            ['ffmpeg', '-loglevel', 'error', '-f', 'mp3', '-i', 'pipe:0',
+             '-ac', '1', '-c:a', 'pcm_s16le', '-f', 's16le', 'pipe:1'],
+            input=data[base + do + 4:base + do + 4 + dl], capture_output=True)
+        if p.returncode != 0:
+            raise RuntimeError(f'ffmpeg failed on {name}: {p.stderr[-200:]}')
+        out[name] = wav_wrap(p.stdout, 22050)
     return out
 
 
@@ -95,7 +126,7 @@ def extract(char):
             if len(parts) < 5:
                 continue
             fname = parts[0]
-            if fname.upper().endswith(('.FAS', '.WAS')):
+            if fname.upper().endswith(('.FAS', '.WAS', '.WA3')):
                 try:
                     want[fname] = int(parts[3])
                 except ValueError:
@@ -107,9 +138,10 @@ def extract(char):
             for f, data in blobs.items():
                 if len(data) == rawsz:
                     got.add(fname)
-                    if fname.upper().endswith('.WAS'):
+                    if fname.upper().endswith(('.WAS', '.WA3')):
                         os.makedirs(snd, exist_ok=True)
-                        sounds = split_was(data)
+                        splitter = split_wa3 if fname.upper().endswith('.WA3') else split_was
+                        sounds = splitter(data)
                         for n, wav in sounds.items():
                             with gzip.open(os.path.join(snd, n.upper() + '.wav.gz'), 'wb', 6) as fh:
                                 fh.write(wav)
