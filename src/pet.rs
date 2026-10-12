@@ -38,6 +38,17 @@ struct Level {
     dir: i8,
 }
 
+/// A screen-edge walk transition requested by a `fence_*` def.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Fence {
+    /// Horizontal travel: -1 left, 0 vertical-only, +1 right.
+    pub dx: i8,
+    /// Vertical travel: -1 up, 0 horizontal-only, +1 down.
+    pub dy: i8,
+    /// true: window slides from the edge to its rest position.
+    pub entering: bool,
+}
+
 /// Current sprite to draw: scene + frame id + pixel offset. id 0 = blank.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Sprite {
@@ -56,6 +67,10 @@ pub struct Pet {
     frame_at: Instant,
     frame_dur: Duration,
     walk_dir: i8,
+    /// Active screen-edge transition (`fence_*`): direction the window
+    /// must travel and whether it enters (edge -> rest) or exits
+    /// (rest -> edge). The host slides the window from this.
+    fence: Option<Fence>,
     /// Idle gap: when to start the next random scene.
     next_at: Option<Instant>,
     speed: f64,
@@ -105,6 +120,7 @@ impl Pet {
             frame_at: Instant::now(),
             frame_dur: frame_dur_for(1.0),
             walk_dir: 0,
+            fence: None,
             next_at: None,
             speed: 1.0,
             bag: Vec::new(),
@@ -165,6 +181,36 @@ impl Pet {
 
     pub fn walk_dir(&self) -> i8 {
         self.walk_dir
+    }
+    /// True while a scene's step stack is non-empty (mid-scene).
+    pub fn playing(&self) -> bool {
+        !self.stack.is_empty()
+    }
+
+    /// Active fence transition, if any.
+    pub fn fence(&self) -> Option<Fence> {
+        self.fence
+    }
+
+    /// Host calls when a fence slide finished: drop the transition and the
+    /// walk hint it owned so the next def can set a new one.
+    pub fn fence_done(&mut self) {
+        self.fence = None;
+        self.walk_dir = 0;
+    }
+
+    /// Host calls when a walk-out reached the screen edge: pop the walk
+    /// loop levels so the character stops marching forever.
+    pub fn abort_walk(&mut self) {
+        while let Some(l) = self.stack.last() {
+            if l.dir != 0 {
+                self.stack.pop();
+            } else {
+                break;
+            }
+        }
+        self.walk_dir = self.stack.iter().rev().find_map(|l| (l.dir != 0).then_some(l.dir)).unwrap_or(0);
+        self.fence = None;
     }
 
     /// Click at native sprite coords: resolve the touch.FAS hotspot under the
@@ -428,14 +474,34 @@ impl Pet {
                         _ => {}
                     }
                     if name.starts_with("fence_") {
-                        // screen-edge transitions: pick a walk direction
-                        self.walk_dir = if name.contains("lb") || name.contains("lm") || name.contains("tl") {
+                        // Screen-edge transition: the window slides
+                        // between a screen edge and its rest position.
+                        // Suffix _in / _out gives the travel direction.
+                        // Edge letters appear in either order (fence_lb
+                        // and fence_tl both exist) and `fs` (front stage,
+                        // bottom-center) matches neither position slot, so
+                        // scan the name instead of reading fixed bytes.
+                        let edge = name
+                            .trim_start_matches("fence_")
+                            .trim_end_matches("_in")
+                            .trim_end_matches("_out");
+                        let dx = if edge.contains('l') {
                             1
-                        } else if name.contains("rb") || name.contains("rm") || name.contains("tr") {
+                        } else if edge.contains('r') {
                             -1
                         } else {
-                            self.walk_dir
+                            0
                         };
+                        let dy = if edge.contains('t') {
+                            1
+                        } else if edge.contains('b') || edge.contains('f') {
+                            -1
+                        } else {
+                            0
+                        };
+                        let entering = name.ends_with("_in");
+                        self.fence = Some(Fence { dx, dy, entering });
+                        self.walk_dir = dx;
                         self.frame_dur = Duration::from_millis(300);
                         return true;
                     }

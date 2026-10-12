@@ -416,6 +416,11 @@ struct App {
     shaper: xshape::Shaper,
     /// Window auto-hidden during a blank inter-scene gap.
     hidden_by_blank: bool,
+    /// Window position to return to after a fence slide (rest anchor).
+    fence_rest: Option<(i32, i32)>,
+    /// When the window was first seen fully off-screen mid-scene with a
+    /// known home position (see `ensure_visible`).
+    off_since: Option<Instant>,
     /// Last render drew any visible content (sprite in bounds, matte).
     drew_content: bool,
     /// Suppress auto-hide until this instant (user just chose Show).
@@ -470,12 +475,65 @@ impl App {
         let secs = (2.5 + text.chars().count() as f64 * 0.06).min(14.0);
         self.bubble = Some((text.to_string(), Instant::now() + Duration::from_secs_f64(secs)));
     }
-    /// Walk the window along the bottom of the monitor per pet.walk_dir().
+    /// Walk the window along the bottom of the monitor per pet.walk_dir(),
+    /// and slide it between a screen edge and its rest position for
+    /// `fence_*` transitions (walk in / walk out).
     fn apply_walk(&mut self, now: Instant) {
         let Some(w) = &self.window else { return };
-        let dir = self.pet.walk_dir();
         let dt = now.duration_since(self.last_move).as_secs_f64().min(0.25);
         self.last_move = now;
+        let speed = 70.0 * self.scale;
+        if let Some(f) = self.pet.fence() {
+            let Some(m) = w.current_monitor().or_else(|| w.primary_monitor()) else { return };
+            let (mx, my, mw, mh) = (m.position().x, m.position().y, m.size().width as i32, m.size().height as i32);
+            let (ww, wh) = {
+                let s = w.outer_size();
+                (s.width as i32, s.height as i32)
+            };
+            let p = match w.outer_position() { Ok(p) => p, Err(_) => return };
+            // Rest position: where the window sits when not transitioning.
+            let rest = self.fence_rest.unwrap_or((p.x, p.y));
+            if self.fence_rest.is_none() {
+                self.fence_rest = Some(rest);
+            }
+            // Edge anchor: window fully off-screen at the fence edge.
+            let ex = match f.dx {
+                1 => mx - ww,
+                -1 => mx + mw,
+                _ => rest.0,
+            };
+            let ey = match f.dy {
+                1 => my - wh,
+                -1 => my + mh,
+                _ => rest.1,
+            };
+            let (tx, ty) = if f.entering { (rest.0, rest.1) } else { (ex, ey) };
+            let step = speed * 2.2 * dt;
+            let mut nx = p.x as f64;
+            let mut ny = p.y as f64;
+            let mut done = true;
+            for (cur, tgt, ax) in [(p.x as f64, tx as f64, &mut nx), (p.y as f64, ty as f64, &mut ny)] {
+                let d = tgt - cur;
+                if d.abs() <= step.max(1.0) {
+                    *ax = tgt;
+                } else {
+                    *ax = cur + d.signum() * step;
+                    done = false;
+                }
+            }
+            let _ = w.set_outer_position(Position::Physical(PhysicalPosition::new(nx as i32, ny as i32)));
+            if let Ok(p) = w.outer_position() {
+                self.walk_x = p.x as f64;
+            }
+            if done {
+                // Keep fence_rest across exits: it is the home the next
+                // `fence_*_in` slides back to. Clearing it here made the
+                // pet re-enter at the off-screen edge and stay invisible.
+                self.pet.fence_done();
+            }
+            return;
+        }
+        let dir = self.pet.walk_dir();
         if dir == 0 {
             if let Ok(p) = w.outer_position() {
                 self.walk_x = p.x as f64;
@@ -485,17 +543,64 @@ impl App {
         let Some(m) = w.current_monitor().or_else(|| w.primary_monitor()) else { return };
         let (mx, mw) = (m.position().x, m.size().width as i32);
         let ww = w.outer_size().width as i32;
-        let speed = 70.0 * self.scale;
         let mut x = self.walk_x + dir as f64 * speed * dt;
-        // wrap around the screen edges
-        if x < (mx - ww) as f64 {
-            x = (mx + mw) as f64;
-        } else if x > (mx + mw) as f64 {
-            x = (mx - ww) as f64;
+        // Clamp at the screen edges: a walked-off character stops just off
+        // screen (the original sprite simply left the desktop); the old
+        // wrap-around made the empty window march forever.
+        let lo = (mx - ww + 24) as f64;
+        let hi = (mx + mw - 24) as f64;
+        if x < lo || x > hi {
+            x = x.clamp(lo, hi);
+            if (x - self.walk_x).abs() < 0.5 {
+                self.pet.abort_walk();
+            }
         }
         self.walk_x = x;
         if let Ok(p) = w.outer_position() {
             w.set_outer_position(Position::Physical(PhysicalPosition::new(x as i32, p.y)));
+        }
+    }
+    /// A scene that plays frames while the window is parked off-screen
+    /// (previous scene walked out, this one has no `fence_*_in`) would
+    /// leave the pet invisible forever. After a grace period long enough
+    /// for the next scene's own walk-in to begin, slide it back home.
+    /// Only applies when a home position is known (a fence transition
+    /// happened since the last drag); a user-dragged off-screen window
+    /// stays where it was put.
+    fn ensure_visible(&mut self, now: Instant) {
+        let out = (|| -> Option<bool> {
+            let w = self.window.as_ref()?;
+            if self.pet.fence().is_some() || self.pet.walk_dir() != 0 || !self.pet.playing() {
+                return Some(false);
+            }
+            let m = w.current_monitor().or_else(|| w.primary_monitor())?;
+            let (mx, my, mw, mh) = (
+                m.position().x,
+                m.position().y,
+                m.size().width as i32,
+                m.size().height as i32,
+            );
+            let s = w.outer_size();
+            let p = w.outer_position().ok()?;
+            let (ww, wh) = (s.width as i32, s.height as i32);
+            Some(p.x + ww <= mx || p.x >= mx + mw || p.y + wh <= my || p.y >= my + mh)
+        })()
+            .unwrap_or(false);
+        if !out || self.fence_rest.is_none() {
+            self.off_since = None;
+            return;
+        }
+        match self.off_since {
+            None => self.off_since = Some(now),
+            Some(t) if now.duration_since(t) < Duration::from_secs_f64(2.5) => {}
+            Some(_) => {
+                if let (Some(w), Some(rest)) = (&self.window, self.fence_rest) {
+                    let _ = w
+                        .set_outer_position(Position::Physical(PhysicalPosition::new(rest.0, rest.1)));
+                    self.walk_x = rest.0 as f64;
+                }
+                self.off_since = None;
+            }
         }
     }
 
@@ -892,6 +997,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         walk_x: 0.0,
         preloaded: String::new(),
         hidden_by_blank: false,
+        fence_rest: None,
+        off_since: None,
         drew_content: true,
         blank_hide_after: None,
     };
@@ -1119,6 +1226,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let _ = w.set_cursor_grab(CursorGrabMode::None);
                             }
                             save_state(app.window.as_deref(), app.scale, &app.character);
+                            // A drag re-homes the pet: the new spot is
+                            // where fence transitions should return to.
+                            app.fence_rest = None;
                         } else {
                             let (mx, my) = app.mouse;
                             if !app.menu_click(mx, my) {
@@ -1190,15 +1300,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if dragging {
                                 app.press = None;
                                 save_state(app.window.as_deref(), app.scale, &app.character);
+                                app.fence_rest = None;
                             }
                         }
                     }
                 }
                 let dragging = app.press.as_ref().map_or(false, |p| p.dragging);
-                if !app.menu_open && !dragging && app.pet.walk_dir() != 0 {
+                if !app.menu_open && !dragging && (app.pet.walk_dir() != 0 || app.pet.fence().is_some()) {
                     app.apply_walk(now);
                     changed = true;
                 }
+                app.ensure_visible(now);
                 // Blank inter-scene gap: hide the window instead of showing
                 // an empty (black without compositor) box — the original
                 // deskmate simply left the screen between scenes.
