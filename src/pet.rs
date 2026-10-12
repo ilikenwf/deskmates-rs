@@ -65,6 +65,14 @@ pub struct Pet {
     bag_at: usize,
     /// A ` !name` token fired since the last `take_sound`.
     pending_sound: Option<String>,
+    /// Scene names played during the inter-scene gap instead of blanking
+    /// (user-classified "interstitial" scenes from the config).
+    pub interstitial: Vec<String>,
+    /// 0: next scene after the gap is a real scene (or first filler);
+    /// 1: a filler just played, so the next gap plays a real scene.
+    gap_phase: u8,
+    /// Debug (`--scene NAME`): loop one scene forever, no random pool.
+    pub scene_loop: Option<String>,
 }
 
 /// Scenes that read as touch reactions (the stripped touch.FAS mapped
@@ -102,6 +110,9 @@ impl Pet {
             bag: Vec::new(),
             bag_at: 0,
             pending_sound: None,
+            interstitial: Vec::new(),
+            gap_phase: 0,
+            scene_loop: None,
         };
         pet.start_random();
         // Original startup: S_Deskmate_Enter (walk in + a weighted-random
@@ -232,7 +243,25 @@ impl Pet {
             if let Some(at) = self.next_at {
                 if now >= at {
                     self.next_at = None;
-                    self.start_random();
+                    if let Some(s) = self.scene_loop.clone() {
+                        if !self.play_named(&s) {
+                            self.start_random();
+                        }
+                    } else if self.gap_phase == 0 && !self.interstitial.is_empty() {
+                        // Gap filler first so she never blanks out; the
+                        // filler ending re-arms the gap for a real scene.
+                        self.gap_phase = 1;
+                        let s = self.interstitial
+                            [rand::rng().random_range(0..self.interstitial.len())]
+                            .clone();
+                        if !self.play_named(&s) {
+                            self.gap_phase = 0;
+                            self.start_random();
+                        }
+                    } else {
+                        self.gap_phase = 0;
+                        self.start_random();
+                    }
                     changed = true;
                 }
             }

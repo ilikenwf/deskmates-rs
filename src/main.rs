@@ -47,11 +47,15 @@ pub struct Config {
     pub agent_model: String,
     /// Show adults-only (nudity) scenes; hidden from all random pools unless true.
     pub adult: bool,
+    /// Scene names played during inter-scene gaps instead of blanking
+    /// (classify with --scenes / --scene NAME).
+    #[serde(default)]
+    pub interstitial: Vec<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { scale: 1.0, x: None, y: None, character: "tahni".into(), agent_endpoint: String::new(), agent_key: String::new(), agent_model: String::new(), adult: false }
+        Config { scale: 1.0, x: None, y: None, character: "tahni".into(), agent_endpoint: String::new(), agent_key: String::new(), agent_model: String::new(), adult: false, interstitial: Vec::new() }
     }
 }
 
@@ -791,10 +795,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let root = assets_root();
     let sc = scenes::Scenes::load(&root.join("characters").join(&character))?;
+    if args.iter().any(|a| a == "--scenes") {
+        let mut names: Vec<&String> = sc.scenes.keys().collect();
+        names.sort();
+        for n in names {
+            println!("{n}");
+        }
+        return Ok(());
+    }
+    let scene_loop = args
+        .iter()
+        .position(|a| a == "--scene")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
     let (fw0, fh0) = sc.frame_size();
     let sc = Arc::new(sc);
     let font = FontArc::try_from_vec(std::fs::read(root.join("fonts/LiberationSans-Regular.ttf"))?)?;
-    let pet = Pet::new(sc.clone(), cfg.adult);
+    let mut pet = Pet::new(sc.clone(), cfg.adult);
+    pet.interstitial = cfg.interstitial.clone();
+    if let Some(s) = &scene_loop {
+        if !pet.play_named(s) {
+            eprintln!("no scene matching {s:?}; see --scenes");
+        } else {
+            pet.scene_loop = Some(s.clone());
+        }
+    }
     let mut agent_cfg = agent::AgentCfg {
         endpoint: cfg.agent_endpoint.clone(),
         key: cfg.agent_key.clone(),
