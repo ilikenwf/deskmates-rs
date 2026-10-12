@@ -268,8 +268,10 @@ impl Pet {
                             self.start_random();
                         }
                     } else if self.gap_phase == 0 && !self.interstitial.is_empty() {
-                        // Gap filler first so she never blanks out; the
-                        // filler ending re-arms the gap for a real scene.
+                        // User-classified interstitial scenes fill the gap
+                        // (classify candidates with --scenes/--scene NAME);
+                        // the filler ending re-arms the gap for a real
+                        // scene via gap_phase.
                         self.gap_phase = 1;
                         let s = self.interstitial
                             [rand::rng().random_range(0..self.interstitial.len())]
@@ -331,7 +333,13 @@ impl Pet {
     fn steps_for(&self, scene: &str, name: &str) -> Option<Vec<Step>> {
         let sc: &Scene = self.scenes.scenes.get(scene)?;
         // Re-roll weighted `{a|b%2}` choice groups fresh on every play.
-        let body = sc.raw.get(name)?;
+        // Shared behavior defs (blink…) live in common.FAS but reference
+        // the playing scene's frame bank, so fall back to common for the
+        // def while frames stay resolved against `scene`.
+        let body = sc
+            .raw
+            .get(name)
+            .or_else(|| self.scenes.scenes.get("common").and_then(|c| c.raw.get(name)))?;
         let body = crate::faz::resolve_choices(body, &mut rand::rng());
         let toks = crate::faz::parse_reflist(&body);
         let mut steps = Vec::with_capacity(toks.len());
