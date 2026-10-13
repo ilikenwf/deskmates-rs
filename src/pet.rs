@@ -11,12 +11,54 @@ use rand::Rng;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use rand::seq::{IndexedRandom, SliceRandom};
+use std::collections::VecDeque;
 
 const TIME_REP: u32 = 1000;
 
 /// Probability a random draw takes the adult subpool when the gate is
 /// open and `prefer_adult` is on (config `prefer_adult`).
 const ADULT_PREF_P: f64 = 0.6;
+
+/// D4 "dig deep": hand out bag slot `at`, but when that pair is in the
+/// recent-play ring, look up to 3 slots ahead for a fresher pair and
+/// swap it into `at` — the skipped pair keeps its turn, so the
+/// shuffle-bag spread is untouched. When everything in reach is recent
+/// (a pool too small to dodge), the bag's own pick stands.
+fn pick_fresh(
+    entries: &[(String, String)],
+    bag: &mut [usize],
+    at: usize,
+    recent: &VecDeque<(String, String)>,
+) -> usize {
+    let first = bag[at];
+    if recent.iter().any(|p| *p == entries[first]) {
+        for k in 1..=3 {
+            if at + k >= bag.len() {
+                break;
+            }
+            let cand = bag[at + k];
+            if !recent.iter().any(|p| *p == entries[cand]) {
+                bag.swap(at, at + k);
+                return cand;
+            }
+        }
+    }
+    first
+}
+
+/// Push a played pair onto the anti-replay ring: newest first, deduped,
+/// capped at `cap` (production uses `min(20, pool/2)`). In-memory only.
+fn push_recent(
+    recent: &mut VecDeque<(String, String)>,
+    pair: (String, String),
+    cap: usize,
+) {
+    recent.retain(|p| *p != pair);
+    recent.push_front(pair);
+    while recent.len() > cap {
+        recent.pop_back();
+    }
+}
 const MAX_DEPTH: usize = 24;
 
 #[derive(Clone, Debug)]
@@ -101,6 +143,9 @@ pub struct Pet {
     /// With `adult`: each random draw takes an adults-only pair with
     /// [`ADULT_PREF_P`] probability when the subpool has candidates.
     prefer_adult: bool,
+    /// D4 anti-replay ring: the last `min(20, pool/2)` played
+    /// (scene, entry) pairs, newest first. In-memory only.
+    recent: VecDeque<(String, String)>,
     /// Bubble text for a fired ambient line (host consumes via take_talk).
     pending_talk: Option<String>,
 }
@@ -160,6 +205,7 @@ impl Pet {
             scene_loop_entry: None,
             adult,
             prefer_adult: false,
+            recent: VecDeque::new(),
             pending_talk: None,
         };
         pet.start_random();
@@ -497,8 +543,12 @@ impl Pet {
             self.bag.shuffle(&mut rand::rng());
             self.bag_at = 0;
         }
-        if let Some((scene, entry)) = self.entries.get(self.bag[self.bag_at]).cloned() {
-            self.bag_at += 1;
+        // "Dig deep": a bag pick that was just played swaps with a
+        // fresher pair up to 3 slots ahead, so back-to-back repeats
+        // thin out without breaking the shuffle-bag spread.
+        let idx = pick_fresh(&self.entries, &mut self.bag, self.bag_at, &self.recent);
+        self.bag_at += 1;
+        if let Some((scene, entry)) = self.entries.get(idx).cloned() {
             self.play(&scene, &entry);
         }
     }
@@ -508,6 +558,8 @@ impl Pet {
         self.walk_dir = 0;
         self.speed = 1.0;
         self.next_at = None;
+        let cap = 20usize.min(self.entries.len() / 2);
+        push_recent(&mut self.recent, (scene.to_string(), entry.to_string()), cap);
         if let Some(steps) = self.steps_for(scene, entry) {
             self.stack.push(Level { steps, idx: 0, rep_left: 1, deadline: None, dir: 0 });
         }
@@ -825,5 +877,87 @@ mod gating_tests {
         };
         let hits = (0..1000).filter(|_| pet.adult_pref_roll(next())).count();
         assert!((500..=700).contains(&hits), "expected ~600/1000 adult-preferred draws, got {hits}");
+    }
+}
+
+#[cfg(test)]
+mod dig_tests {
+    use super::*;
+
+    fn pool3() -> Vec<(String, String)> {
+        (0..3).map(|i| (format!("s{i}"), format!("e{i}"))).collect()
+    }
+
+    /// Pool of 3 pairs, ring N=2: no pair repeats within 2 consecutive
+    /// plays — the dig-deep resample always finds the third pair.
+    #[test]
+    fn small_pool_no_repeat_within_two_plays() {
+        let entries = pool3();
+        // Deterministic stand-ins for the bag shuffle, cycled forever.
+        let cycles = [[0usize, 1, 2], [2, 0, 1], [1, 2, 0], [0, 2, 1]];
+        let mut recent: VecDeque<(String, String)> = VecDeque::new();
+        let mut played: Vec<usize> = Vec::new();
+        let mut bag = cycles[0].to_vec();
+        let mut at = 0usize;
+        for step in 0..24 {
+            if at >= bag.len() {
+                bag = cycles[(step % (cycles.len() - 1)) + 1].to_vec();
+                at = 0;
+            }
+            let idx = pick_fresh(&entries, &mut bag, at, &recent);
+            at += 1;
+            played.push(idx);
+            push_recent(&mut recent, entries[idx].clone(), 2);
+        }
+        // Ring N=2, pool 3: no pair repeats within 2 consecutive plays.
+        for i in 1..played.len() {
+            assert_ne!(played[i], played[i - 1], "immediate repeat: {played:?}");
+        }
+        for i in 2..played.len() {
+            assert_ne!(played[i], played[i - 2], "repeat within 2 plays: {played:?}");
+        }
+    }
+
+    /// Large pool: consecutive shuffled bag cycles still spread — no
+    /// immediate repeats and nothing starves over 500 seeded draws.
+    #[test]
+    fn large_pool_spreads_across_cycles() {
+        let n = 50usize;
+        let entries: Vec<(String, String)> =
+            (0..n).map(|i| (format!("s{i}"), format!("e{i}"))).collect();
+        let mut state = 0x853C49E6748FBAD4u64;
+        let mut rnd = |m: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as usize % m
+        };
+        let mut recent: VecDeque<(String, String)> = VecDeque::new();
+        let mut counts = vec![0usize; n];
+        let mut prev: Option<usize> = None;
+        let mut draws = 0;
+        while draws < 500 {
+            let mut bag: Vec<usize> = (0..n).collect();
+            for i in (1..n).rev() {
+                let j = rnd(i + 1);
+                bag.swap(i, j);
+            }
+            let mut at = 0;
+            while at < bag.len() && draws < 500 {
+                let idx = pick_fresh(&entries, &mut bag, at, &recent);
+                at += 1;
+                draws += 1;
+                if let Some(p) = prev {
+                    assert_ne!(p, idx, "immediate repeat in a {n}-pair pool");
+                }
+                prev = Some(idx);
+                counts[idx] += 1;
+                push_recent(&mut recent, entries[idx].clone(), 20.min(n / 2));
+            }
+        }
+        assert!(counts.iter().all(|c| *c > 0), "a pair starved over 500 draws: {counts:?}");
+        let min = counts.iter().min().unwrap();
+        let max = counts.iter().max().unwrap();
+        assert!(*max <= *min * 4, "rotation lopsided: min {min} max {max}");
     }
 }

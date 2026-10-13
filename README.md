@@ -192,7 +192,10 @@ the `assets/` tree. Engine code in `src/` and `analysis/` is MIT.
 
 - [x] All 11 2D characters (Tahni 114 scenes … Dancers 49) — walking,
       touch reactions, tray + in-app character switcher, zoom, shuffle-bag
-      scene order (every scene plays before any repeats)
+      scene order (every scene plays before any repeats) with **"dig
+      deep"** anti-replay: a pair played inside the last `min(20, pool/2)`
+      plays swaps with a fresher bag pick (up to 3 ahead) instead of
+      coming back around
 - [x] Optional OpenAI-compatible chat ("Ask Tahni…", off by default)
 - [x] Adults-only scene gate (Settings checkbox, default off) + optional
       **prefer-adult** rotation (Settings checkbox): when unlocked, each
