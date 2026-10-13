@@ -17,6 +17,7 @@ mod adult;
 mod audio;
 mod agent;
 mod ask_ui;
+mod classic;
 mod faz;
 mod pet;
 mod scenes;
@@ -373,7 +374,11 @@ fn display_name(character: &str) -> String {
     }
 }
 
-fn make_tray(display: &str) -> Option<tray_icon::TrayIcon> {
+fn make_tray(
+    display: &str,
+    character: &str,
+    adult: bool,
+) -> Option<(tray_icon::TrayIcon, Vec<(String, tray_icon::menu::MenuItem)>)> {
     use tray_icon::menu::{Menu, MenuItem, Submenu};
     use tray_icon::TrayIconBuilder;
     #[cfg(target_os = "linux")]
@@ -401,8 +406,26 @@ fn make_tray(display: &str) -> Option<tray_icon::TrayIcon> {
         let item = MenuItem::with_id(format!("char:{c}"), display_name(c), true, None);
         chars.append_items(&[&item]).ok();
     }
+    // Classic submenu: this character's early-set scenes (no classic set
+    // = no submenu). Adults-gated entries start disabled; the handles are
+    // kept so the gate can flip live when the config reloads.
+    let classic = Submenu::new("Classic", true);
+    let mut classic_items: Vec<(String, tray_icon::menu::MenuItem)> = Vec::new();
+    for cs in crate::classic::classic_set(character) {
+        let item = MenuItem::with_id(
+            format!("classic:{}", cs.scene),
+            cs.label,
+            adult || !crate::adult::is_adult(cs.scene),
+            None,
+        );
+        classic_items.push((cs.scene.to_string(), item.clone()));
+        classic.append(&item).ok();
+    }
     let quit = MenuItem::with_id("quit", "Quit", true, None);
     menu.append_items(&[&toggle, &mv, &touch, &ask, &next, &chars, &settings, &about, &quit]).ok()?;
+    if !classic_items.is_empty() {
+        menu.append(&classic).ok()?;
+    }
     TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         .with_menu_on_left_click(false)
@@ -410,6 +433,7 @@ fn make_tray(display: &str) -> Option<tray_icon::TrayIcon> {
         .with_icon(icon)
         .build()
         .map_err(|e| eprintln!("tray: build failed: {e} (Plasma: check tray Settings > Entries - new items can be hidden by default)")).ok()
+        .map(|t| (t, classic_items))
 }
 
 /// Left-button press state for drag-to-move. On X11 the drag is driven by
@@ -443,6 +467,20 @@ const MENU: &[MenuItem] = &[
     MenuItem { label: "Quit" },
 ];
 
+/// Which row of the in-window menu overlay a click landed on; the
+/// classic submenu replaces the main list while open.
+#[derive(Clone, Copy, PartialEq)]
+enum MenuRow {
+    /// Index into MENU.
+    Item(usize),
+    /// "Classic" opener row (only present when the character has one).
+    OpenClassic,
+    /// Index into the current classic list.
+    ClassicItem(usize),
+    /// "Back" row of the classic submenu.
+    ClassicBack,
+}
+
 struct App {
     pet: Pet,
     scenes: Arc<scenes::Scenes>,
@@ -461,7 +499,9 @@ struct App {
     mouse: (f64, f64),
     press: Option<Press>,
     menu_open: bool,
-    menu_rects: Vec<(usize, (i32, i32, i32, i32))>,
+    /// The classic submenu is open in place of the main menu list.
+    classic_open: bool,
+    menu_rects: Vec<(MenuRow, (i32, i32, i32, i32))>,
     about_until: Option<Instant>,
     agent: agent::AgentCfg,
     agent_tx: std::sync::mpsc::Sender<agent::Msg>,
@@ -472,11 +512,17 @@ struct App {
     cfg_mtime: Option<std::time::SystemTime>,
     /// Config toggle: pet may roam (walk/fence scenes move the window).
     walk_enabled: bool,
+    /// Current adults-only gate (mirrors config; drives the classic
+    /// submenu visibility and the tray item enabled state).
+    adult: bool,
     /// User-idle state (MIT-SCREEN-SAVER): the original gated its actions
     /// on user inactivity; we gate roaming on it too.
     user_idle: bool,
     last_idle_query: Instant,
     tray: Option<tray_icon::TrayIcon>,
+    /// Handles to the tray Classic submenu items (scene name, item) so
+    /// the adult gate can enable/disable them live.
+    tray_classic: Vec<(String, tray_icon::menu::MenuItem)>,
     last_move: Instant,
     /// Fractional window x for smooth walking.
     walk_x: f64,
@@ -619,7 +665,9 @@ impl App {
         self.cur_dims = (fw, fh);
         self.character = name.to_string();
         self.display = display_name(name);
-        self.pet = Pet::new(self.scenes.clone(), load_config().adult);
+        let adult = load_config().adult;
+        self.adult = adult;
+        self.pet = Pet::new(self.scenes.clone(), adult);
         // Rebind sound playback to the new character's sounds dir. The
         // WAV cache lives inside Audio keyed by bare name, so rebuilding
         // it here also stops same-named waves (LAND, SWOOSH_A, …) from
@@ -630,6 +678,7 @@ impl App {
         self.preloaded = String::new();
         self.bubble = None;
         self.menu_open = false;
+        self.classic_open = false;
         if let Some(w) = &self.window {
             let (lw, lh) = self.win_logical();
             anchored_resize(w, lw, lh);
@@ -643,7 +692,12 @@ impl App {
             Some(t) => {
                 let _ = t.set_tooltip(Some(format!("{} the Deskmate", self.display)));
             }
-            None => self.tray = make_tray(&self.display),
+            None => {
+                if let Some((t, items)) = make_tray(&self.display, &self.character, self.adult) {
+                    self.tray = Some(t);
+                    self.tray_classic = items;
+                }
+            }
         }
     }
 
@@ -789,6 +843,8 @@ impl App {
     }
 
     fn render(&mut self) {
+        // Computed before the pixels borrow: classic_list borrows self.
+        let classic = self.classic_list();
         let Some(px) = &mut self.pixels else { return };
         let (w, h) = self.size;
         let sf = self.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0);
@@ -839,20 +895,42 @@ impl App {
                 }
             }
         }
-        // menu overlay
+        // menu overlay: main list, or the classic submenu in its place.
         self.menu_rects.clear();
         if self.menu_open {
             let s = (sf * self.scale.max(1.0)) as f32;
+            let rows: Vec<(MenuRow, String)> = if self.classic_open {
+                let mut r: Vec<(MenuRow, String)> = classic
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| (MenuRow::ClassicItem(i), c.label.to_string()))
+                    .collect();
+                r.push((MenuRow::ClassicBack, "Back".to_string()));
+                r
+            } else {
+                let mut r: Vec<(MenuRow, String)> = MENU
+                    .iter()
+                    .enumerate()
+                    .map(|(i, item)| (MenuRow::Item(i), item.label.replace("{CHAR}", &self.display)))
+                    .collect();
+                if !classic.is_empty() {
+                    r.push((MenuRow::OpenClassic, "Classic".to_string()));
+                }
+                r
+            };
+            // The window IS the scene canvas: shrink rows so a long menu
+            // (the classic submenu can run to a dozen entries) still fits.
             let bw = (130.0 * s) as i32;
-            let bh = (24.0 * s) as i32;
+            let fit = (h as f32 / rows.len().max(1) as f32) as i32;
+            let bh = ((24.0 * s) as i32).min(fit.max((14.0 * s) as i32));
             let bx = (w as i32 - bw).max(0);
             let mut by = 0i32;
-            for (i, item) in MENU.iter().enumerate() {
+            for (row, label) in &rows {
                 fill_rect(&mut canvas, w, h, bx, by, bw, bh, [245, 245, 250, 235]);
                 stroke_rect(&mut canvas, w, h, bx, by, bw, bh, [120, 120, 130, 255]);
-                let label = item.label.replace("{CHAR}", &self.display);
-                draw_text(&mut canvas, w, h, &self.font, &label, bx as f32 + 8.0 * s, by as f32 + bh as f32 * 0.68, PxScale::from(13.0 * s), [20, 20, 25, 255]);
-                self.menu_rects.push((i, (bx, by, bw, bh)));
+                let ts = (13.0 * s).min(bh as f32 * 0.62);
+                draw_text(&mut canvas, w, h, &self.font, label, bx as f32 + 8.0 * s, by as f32 + bh as f32 * 0.68, PxScale::from(ts), [20, 20, 25, 255]);
+                self.menu_rects.push((*row, (bx, by, bw, bh)));
                 by += bh;
             }
         }
@@ -905,40 +983,75 @@ impl App {
         }
     }
 
+    /// The classic submenu for the current character: classic-set scenes
+    /// that are actually loaded, minus adults-only ones while the gate is
+    /// off (the same rule that hides them from the random pools).
+    fn classic_list(&self) -> Vec<&'static classic::ClassicScene> {
+        classic::classic_set(&self.character)
+            .iter()
+            .filter(|cs| self.scenes.scenes.contains_key(cs.scene))
+            .filter(|cs| self.adult || !crate::adult::is_adult(cs.scene))
+            .collect()
+    }
+
     fn menu_click(&mut self, x: f64, y: f64) -> bool {
-        for (i, (mx, my, mw, mh)) in self.menu_rects.iter().rev() {
+        for (row, (mx, my, mw, mh)) in self.menu_rects.iter().rev() {
             if x >= *mx as f64 && x < (*mx + *mw) as f64 && y >= *my as f64 && y < (*my + *mh) as f64 {
-                self.menu_open = false;
-                match MENU[*i].label {
-                    "Touch" => self.pet.touch(),
-                    "Ask…" => {
-                        if self.agent.enabled() {
-                            fork_child("--ask-ui");
-                        } else {
-                            self.speak("I can chat, but no AI endpoint is set. Right-click, Settings… to add one!");
+                match *row {
+                    MenuRow::OpenClassic => {
+                        self.classic_open = true;
+                        return true;
+                    }
+                    MenuRow::ClassicBack => {
+                        self.classic_open = false;
+                        return true;
+                    }
+                    MenuRow::ClassicItem(i) => {
+                        self.menu_open = false;
+                        self.classic_open = false;
+                        if let Some(cs) = self.classic_list().get(i).copied() {
+                            let scene = cs.scene.to_string();
+                            if !self.pet.play_named(&scene) {
+                                self.speak("Not right now — that scene is off.");
+                            }
                         }
+                        return true;
                     }
-                    "Next scene" => self.pet.next_scene(),
-                    "Next character" => {
-                        let next = CHARACTERS
-                            .iter()
-                            .position(|c| *c == self.character)
-                            .map(|i| CHARACTERS[(i + 1) % CHARACTERS.len()])
-                            .unwrap_or("tahni");
-                        self.switch_character(next);
-                    }
-                    "Settings…" => fork_child("--settings-ui"),
-                    "Hide" => {
-                        if let Some(w) = &self.window {
-                            w.set_visible(false);
-                            self.hidden_by_blank = false;
+                    MenuRow::Item(i) => {
+                        self.menu_open = false;
+                        self.classic_open = false;
+                        match MENU[i].label {
+                            "Touch" => self.pet.touch(),
+                            "Ask…" => {
+                                if self.agent.enabled() {
+                                    fork_child("--ask-ui");
+                                } else {
+                                    self.speak("I can chat, but no AI endpoint is set. Right-click, Settings… to add one!");
+                                }
+                            }
+                            "Next scene" => self.pet.next_scene(),
+                            "Next character" => {
+                                let next = CHARACTERS
+                                    .iter()
+                                    .position(|c| *c == self.character)
+                                    .map(|i| CHARACTERS[(i + 1) % CHARACTERS.len()])
+                                    .unwrap_or("tahni");
+                                self.switch_character(next);
+                            }
+                            "Settings…" => fork_child("--settings-ui"),
+                            "Hide" => {
+                                if let Some(w) = &self.window {
+                                    w.set_visible(false);
+                                    self.hidden_by_blank = false;
+                                }
+                            }
+                            "About" => self.about_until = Some(Instant::now() + Duration::from_secs(8)),
+                            "Quit" => std::process::exit(0),
+                            _ => {}
                         }
+                        return true;
                     }
-                    "About" => self.about_until = Some(Instant::now() + Duration::from_secs(8)),
-                    "Quit" => std::process::exit(0),
-                    _ => {}
                 }
-                return true;
             }
         }
         false
@@ -1221,6 +1334,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ask_mtime: ask_mtime(),
         cfg_mtime: cfg_mtime(),
         walk_enabled: cfg.walk,
+        adult: cfg.adult,
         user_idle: true,
         last_idle_query: Instant::now(),
         window: None,
@@ -1228,9 +1342,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mouse: (0.0, 0.0),
         press: None,
         menu_open: false,
+        classic_open: false,
         menu_rects: Vec::new(),
         about_until: None,
         tray: None,
+        tray_classic: Vec::new(),
         last_move: Instant::now(),
         walk_x: 0.0,
         preloaded: String::new(),
@@ -1313,6 +1429,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 ref id if id.starts_with("char:") => app.switch_character(&id[5..]),
+                ref id if id.starts_with("classic:") => {
+                    let scene = id[8..].to_string();
+                    if !app.pet.play_named(&scene) {
+                        app.speak("Not right now — that scene is off.");
+                    }
+                }
                 _ => {}
             }
         }
@@ -1371,7 +1493,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let _ = window.set_window_icon(Icon::from_rgba(img.into_raw(), iw, ih).ok());
                 }
                 if app.tray.is_none() {
-                    app.tray = make_tray(&app.display);
+                    if let Some((t, items)) = make_tray(&app.display, &app.character, app.adult) {
+                        app.tray = Some(t);
+                        app.tray_classic = items;
+                    }
                     if app.tray.is_none() {
                         eprintln!("note: system tray unavailable (Linux: install libappindicator)");
                     }
@@ -1519,6 +1644,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } => {
                     app.menu_open = !app.menu_open;
+                    app.classic_open = false;
                     if let Some(w) = &app.window {
                         w.request_redraw();
                     }
@@ -1739,6 +1865,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         app.agent.key = c.agent_key;
                         app.agent.model = c.agent_model;
                         app.pet.set_adult(c.adult);
+                        app.adult = c.adult;
+                        for (scene, item) in &app.tray_classic {
+                            item.set_enabled(c.adult || !adult::is_adult(scene));
+                        }
                         app.walk_enabled = c.walk;
                     }
                 }

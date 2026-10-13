@@ -167,7 +167,16 @@ impl Scenes {
             // nag scene (` !buy_me_now` voice line). Adware: dropped.
             defmap.remove("dialog_buy_me_now");
             rawmap.remove("dialog_buy_me_now");
-            let name = f.name.clone();
+            // Key by filename stem, not the FAZ-internal name: the
+            // classic-mode variants (classic_buggy.bin.gz …) carry the
+            // original internal name `buggy` and must coexist with the
+            // current scene instead of overwriting it in the map. For
+            // every other shipped file the stem equals the internal name.
+            let name = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.trim_end_matches(".bin.gz").to_string())
+                .unwrap_or_else(|| f.name.clone());
             scenes.insert(name.clone(), Scene { name: name.clone(), entries, defs: defmap, raw: rawmap, w, h });
             fazs.insert(name, f);
         }
@@ -283,6 +292,84 @@ impl Scenes {
         }
         out.sort();
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load_char(c: &str) -> Scenes {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("assets/characters/{c}"));
+        Scenes::load(&root).expect("asset tree loads")
+    }
+
+    /// Classic mode: every scene named by `crate::classic` for a shipped
+    /// character must parse into a playable scene (non-empty entries), not
+    /// be silently skipped by the loader's scene filter.
+    #[test]
+    fn classic_scenes_ship_and_parse() {
+        for c in crate::classic::CHARACTERS_WITH_CLASSICS {
+            let s = load_char(c);
+            for cs in crate::classic::classic_set(c) {
+                let scn = s
+                    .scenes
+                    .get(cs.scene)
+                    .unwrap_or_else(|| panic!("{c}: classic scene {} ({}) missing", cs.scene, cs.label));
+                assert!(
+                    !scn.entries.is_empty(),
+                    "{c}: classic scene {} has no playable entries",
+                    cs.scene
+                );
+                assert!(
+                    !s.behaviors.contains(cs.scene),
+                    "{c}: classic scene {} must be a scene, not a behavior bank",
+                    cs.scene
+                );
+                // Entries alone are not enough: the entry points must
+                // actually resolve to frames (the v1.04 demo cuts reuse
+                // the shipped behavior banks for their base poses).
+                let steps: usize = scn
+                    .entries
+                    .iter()
+                    .filter(|e| scn.defs.contains_key(*e))
+                    .count();
+                assert!(steps > 0, "{c}: classic scene {} entries resolve to no defs", cs.scene);
+                let drawn = s
+                    .faz
+                    .get(cs.scene)
+                    .map(|f| f.frames.keys().filter(|id| s.frame(cs.scene, **id as u32).is_some()).count())
+                    .unwrap_or(0);
+                assert!(drawn > 0, "{c}: classic scene {} decodes no frames", cs.scene);
+            }
+        }
+    }
+
+    /// The classic variants carry the original FAZ-internal name of a scene
+    /// that is still shipped (v1.04 `buggy` vs current `buggy`). They must
+    /// coexist: the loader keys by filename stem, so neither overwrites the
+    /// other and both keep their own frame bank.
+    #[test]
+    fn classic_variants_do_not_overwrite_current_scenes() {
+        let s = load_char("tahni");
+        for (current, classic) in [
+            ("buggy", "classic_buggy"),
+            ("dustbuster", "classic_dustbuster"),
+            ("scuba", "classic_scuba"),
+            ("snowboard", "classic_snowboard"),
+            ("space_hopper", "classic_space_hopper"),
+        ] {
+            assert!(s.scenes.contains_key(current), "current {current} lost");
+            assert!(s.scenes.contains_key(classic), "classic {classic} missing");
+            assert_eq!(s.scenes.get(classic).unwrap().name, classic);
+            let cf = s.faz.get(classic).expect("classic faz");
+            let nf = s.faz.get(current).expect("current faz");
+            assert_eq!(cf.name, nf.name, "variant must be the same original scene");
+            assert!(
+                cf.frames != nf.frames || cf.pairs != nf.pairs,
+                "{current} and {classic} carry identical content"
+            );
+        }
     }
 }
 
