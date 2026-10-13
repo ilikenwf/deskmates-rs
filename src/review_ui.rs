@@ -61,6 +61,34 @@ fn in_rect(x: f64, y: f64, r: &(i32, i32, i32, i32)) -> bool {
     x >= r.0 as f64 && x < (r.0 + r.2) as f64 && y >= r.1 as f64 && y < (r.1 + r.3) as f64
 }
 
+/// Startup parent pid. The forked browser is a direct child of the pet
+/// process; when the pet dies (Ctrl+C, menu Quit, kill -9) init/systemd
+/// reaps us and our parent pid changes — the signal to self-exit rather
+/// than linger as an orphan window.
+#[cfg(unix)]
+fn startup_parent() -> u32 {
+    unsafe { libc::getppid() as u32 }
+}
+
+#[cfg(not(unix))]
+fn startup_parent() -> u32 {
+    0
+}
+
+/// True once the pet that forked us has died (we were reparented).
+/// Windows limitation: detecting that without polling needs a process
+/// handle wait (OpenProcess + WaitForSingleObject), and windows-sys is
+/// only a transitive dependency here with the wrong feature set — so on
+/// Windows the forked browser can outlive the pet.
+#[cfg(unix)]
+fn parent_died(start: u32) -> bool {
+    (unsafe { libc::getppid() as u32 }) != start
+}
+
+#[cfg(not(unix))]
+fn parent_died(_start: u32) -> bool {
+    false
+}
 
 /// The character's playable scenes, sorted: (scene name, entry names).
 /// Behaviors (common.FAS etc.) are def sources, never review rows.
@@ -503,6 +531,8 @@ pub fn run(character: &str) -> Result<(), Box<dyn std::error::Error>> {
     };
     ui.rebuild_rows();
 
+    let start_parent = startup_parent();
+
     #[allow(deprecated)]
     el.run(move |event, el| match event {
         Event::NewEvents(winit::event::StartCause::Init) => {
@@ -589,7 +619,15 @@ pub fn run(character: &str) -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         },
         Event::AboutToWait => {
-            el.set_control_flow(ControlFlow::Wait);
+            // Orphan guard: the pet forked us; if it died we were
+            // reparented — close instead of lingering over a dead desktop.
+            if parent_died(start_parent) {
+                el.exit();
+                return;
+            }
+            // Keep a slow tick so the guard above runs even while the
+            // window sits idle (no input events to wake us).
+            el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(500)));
         }
         _ => {}
     })?;
