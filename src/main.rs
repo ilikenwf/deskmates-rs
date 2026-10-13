@@ -441,9 +441,21 @@ fn make_tray(
             return None;
         }
     }
-    let img = image::open(assets_root().join("tray.png")).ok()?.to_rgba8();
+    let img = match image::open(assets_root().join("tray.png")) {
+        Ok(i) => i.to_rgba8(),
+        Err(e) => {
+            eprintln!("tray: tray.png open failed at {}: {e}", assets_root().join("tray.png").display());
+            return None;
+        }
+    };
     let (tw, th) = (img.width(), img.height());
-    let icon = tray_icon::Icon::from_rgba(img.into_raw(), tw, th).ok()?;
+    let icon = match tray_icon::Icon::from_rgba(img.into_raw(), tw, th) {
+        Ok(i) => i,
+        Err(e) => {
+            eprintln!("tray: icon from_rgba failed: {e}");
+            return None;
+        }
+    };
     let menu = Menu::new();
     let toggle = MenuItem::with_id("toggle", "Show / Hide", true, None);
     // Full action mirror of the in-window right-click menu: the tray is the
