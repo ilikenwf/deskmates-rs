@@ -126,6 +126,15 @@ one at startup. `--matte` draws an opaque background (useful over remote
 desktops without a compositor). On Linux a compositor is required for true
 transparency.
 
+**Scene review.** `--scenes` prints every scene name and exits;
+`--scene NAME` loops a single scene; and `--review` steps through the whole
+set one scene at a time — **→/Space** next, **←** back, **Esc** quit — with
+the scene name shown in the window title, the speech bubble, and on stdout
+(`[review 42/132 tahni_kiss]`) so you can copy names as you go. Review mode
+shows gated scenes too (the adults-only gate is forced open); that's what
+it's for — it's how the `src/adult.rs` blocklist gets curated. The same
+flag works in all the sibling repos (deskmates3d-rs, arianna-rs, …).
+
 **Visit <character>** is the original's `ShellExecuteA` menu item, kept: it
 hands the earliest Wayback capture of that character's period product page
 (`tahni.com/deskmate.php`, `fatb.oska.com/deskmate.php`, `kahli.com/...`,
