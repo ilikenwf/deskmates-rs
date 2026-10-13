@@ -25,6 +25,35 @@ const W: u32 = 460;
 const H: u32 = 330;
 const FIELDS: [&str; 3] = ["API endpoint (blank = offline)", "API key", "Model"];
 
+/// Startup parent pid. The forked dialog is a direct child of the pet
+/// process; when the pet dies (Ctrl+C, menu Quit, kill -9) init/systemd
+/// reaps us and our parent pid changes — the signal to self-exit rather
+/// than linger as an orphan window.
+#[cfg(unix)]
+fn startup_parent() -> u32 {
+    unsafe { libc::getppid() as u32 }
+}
+
+#[cfg(not(unix))]
+fn startup_parent() -> u32 {
+    0
+}
+
+/// True once the pet that forked us has died (we were reparented).
+/// Windows limitation: detecting that without polling needs a process
+/// handle wait (OpenProcess + WaitForSingleObject), and windows-sys is
+/// only a transitive dependency here with the wrong feature set — so on
+/// Windows the forked dialog can outlive the pet.
+#[cfg(unix)]
+fn parent_died(start: u32) -> bool {
+    (unsafe { libc::getppid() as u32 }) != start
+}
+
+#[cfg(not(unix))]
+fn parent_died(_start: u32) -> bool {
+    false
+}
+
 struct Ui {
     font: FontArc,
     fields: [String; 3],
@@ -293,7 +322,7 @@ impl Ui {
         stroke_rect(&mut canvas, w, h, bx, by, bw, bh, [0xB0, 0x30, 0x60, 255]);
         draw_text(&mut canvas, w, h, &self.font, "Ask", bx as f32 + bw as f32 / 2.0 - 16.0 * s, by as f32 + bh as f32 * 0.68, scale, [0xB0, 0x30, 0x60, 255]);
         self.save_rect = (bx, by, bw, bh);
-        draw_text(&mut canvas, w, h, &self.font, &self.status, (bx + bw + 14) as f32, by as f32 + bh as f32 * 0.68, scale, [0x20, 0x60, 0x20, 255]);
+        draw_text(&mut canvas, w, h, &self.font, &self.status, bx as f32 + bw as f32 + 14.0 * s, by as f32 + bh as f32 * 0.68, scale, [0x20, 0x60, 0x20, 255]);
         draw_text(
             &mut canvas, w, h, &self.font, "Enter asks. Esc closes.",
             14.0 * s,
@@ -361,7 +390,7 @@ impl Ui {
                 if let Some((a, b)) = self.sel_range() {
                     // Classic navy selection; the selected glyphs are
                     // redrawn white on top.
-                    fill_rect(&mut canvas, w, h, x_at(a) as i32, by + 2, (x_at(b) - x_at(a)).max(0.0) as i32, bh - 4, retro::SELECTION);
+                    fill_rect(&mut canvas, w, h, x_at(a) as i32, by + (2.0 * s) as i32, (x_at(b) - x_at(a)).max(0.0) as i32, bh - (4.0 * s) as i32, retro::SELECTION);
                 }
             }
             retro::text(&mut canvas, w, h, &self.font, &t, &shown, tx, baseline, retro::TEXT);
@@ -371,18 +400,18 @@ impl Ui {
                     retro::text(&mut canvas, w, h, &self.font, &t, &sub, x_at(a), baseline, retro::WHITE);
                 }
                 if self.window.as_ref().is_some_and(|win| win.has_focus()) && self.frame_blink() {
-                    fill_rect(&mut canvas, w, h, x_at(self.caret) as i32, by + 3, (2.0 * s).max(1.0) as i32, bh - 6, retro::DARK);
+                    fill_rect(&mut canvas, w, h, x_at(self.caret) as i32, by + (3.0 * s) as i32, (2.0 * s).max(1.0) as i32, bh - (6.0 * s) as i32, retro::DARK);
                 }
             }
             self.rects.push((bx, by, bw, bh));
         }
 
         retro::checkbox(&mut canvas, w, h, &self.font, &t, (m + ix) as i32, cb1 as i32, "Show adults-only scenes (nudity)", self.adult, false);
-        self.adult_rect = (m as i32, cb1 as i32 - 3, gw, t.box_px() + 7);
+        self.adult_rect = (m as i32, cb1 as i32 - (3.0 * s) as i32, gw, t.box_px() + (7.0 * s) as i32);
         retro::checkbox(&mut canvas, w, h, &self.font, &t, (m + ix) as i32, cb2 as i32, "Prefer adult scenes when unlocked", self.prefer_adult, !self.adult);
-        self.prefer_rect = (m as i32, cb2 as i32 - 3, gw, t.box_px() + 7);
+        self.prefer_rect = (m as i32, cb2 as i32 - (3.0 * s) as i32, gw, t.box_px() + (7.0 * s) as i32);
         retro::checkbox(&mut canvas, w, h, &self.font, &t, (m + ix) as i32, cb3 as i32, "Walk around the screen (pauses while you type)", self.walk, false);
-        self.walk_rect = (m as i32, cb3 as i32 - 3, gw, t.box_px() + 7);
+        self.walk_rect = (m as i32, cb3 as i32 - (3.0 * s) as i32, gw, t.box_px() + (7.0 * s) as i32);
 
         self.save_rect = retro::button(&mut canvas, w, h, &self.font, &t, m as i32, btn_y as i32, (90.0 * s) as i32, (25.0 * s) as i32, "Save", true, false, false);
         let help = "Click a field to edit. Enter saves. Esc closes. Ctrl+A/C/V/X, shift to select.";
@@ -402,6 +431,7 @@ impl Ui {
 
 pub fn run(ask: bool) -> Result<(), Box<dyn std::error::Error>> {
     let el = EventLoop::new()?;
+    let start_parent = startup_parent();
     let font = FontArc::try_from_vec(std::fs::read(assets_root().join("fonts/LiberationSans-Regular.ttf"))?)?;
     let cfg = if ask { crate::Config::default() } else { crate::load_config() };
     let mut ui = Ui {
@@ -585,7 +615,15 @@ pub fn run(ask: bool) -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         },
         Event::AboutToWait => {
-            el.set_control_flow(ControlFlow::Wait);
+            // Orphan guard: the pet forked us; if it died we were
+            // reparented — close instead of lingering over a dead desktop.
+            if parent_died(start_parent) {
+                el.exit();
+                return;
+            }
+            // Keep a slow tick so the guard above runs even while the
+            // window sits idle (no input events to wake us).
+            el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(500)));
         }
         _ => {}
     })?;
