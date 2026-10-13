@@ -46,6 +46,8 @@ pub const ADULT_SCENES: &[&str] = &[
     "kahli_s_dive_b", // topless swim
     "kahli_s_barbarella", // topless frames mid-scene
     "kahli_s_gun",        // topless with rifle
+    "kahli_s_action_b",   // user review 2026-10-13: topless
+    "kahli_s_jabba",      // user review 2026-10-13: exposed breasts
     // FatB
     "fb_s_singe",  // original ships crotch-mosaic: nude
     "fb_s_streak", // streaker with crotch mosaic
