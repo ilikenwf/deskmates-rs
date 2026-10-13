@@ -114,7 +114,7 @@ python3 analysis/pack_assets.py tahni      # or just one
 ```
 
 Right-click: Touch her / Ask Tahni… / Next scene / Next character /
-Settings… / Hide / About / Quit — plus **Classic** where a character has an
+Settings… / Hide / About / Visit <character> / Quit — plus **Classic** where a character has an
 early set (Tahni: the v1.04 demo from the Czech cover CD + dropped v1.04
 scenes, original period labels; see analysis/CLASSIC_MODE.md).
 Left-drag moves her.
@@ -125,6 +125,13 @@ Dancers — the choice persists in the config. `--character <name>` selects
 one at startup. `--matte` draws an opaque background (useful over remote
 desktops without a compositor). On Linux a compositor is required for true
 transparency.
+
+**Visit <character>** is the original's `ShellExecuteA` menu item, kept: it
+hands the earliest Wayback capture of that character's period product page
+(`tahni.com/deskmate.php`, `fatb.oska.com/deskmate.php`, `kahli.com/...`,
+`maeka.com/...`, `teecee.net/...`, `oska.com/deskmate.php`) to your OS
+browser (`xdg-open` / `open` / `cmd /C start`). The pet itself still never
+opens a socket.
 
 ## Optional: chat with an AI (off by default)
 

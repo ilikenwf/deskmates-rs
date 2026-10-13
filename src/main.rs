@@ -37,6 +37,58 @@ use winit::window::CursorGrabMode;
 
 const ABOUT_FMT: &str = "DeskMates-rs v0.1\n{CHAR} the Deskmate, safely reimplemented.\nNo phone-home. No unlock keys. No spyware.\n100% offline. Original animation art.\nClick her to make her react!";
 
+/// The original Manager.exe launched a "Visit <Character>" item per
+/// character with `ShellExecuteA`, straight at that character's own period
+/// product site — the URLs below are the ones decoded out of the shipped
+/// .mnu files (Visit Tahni → tahni.com/deskmate.php, Visit FatB →
+/// fatb.oska.com/deskmate.php, ...). Those sites died with Oska, so each
+/// entry is the earliest good Wayback capture of the original URL. Handing
+/// the URL to the OS browser is the original's behavior; this binary still
+/// contains no network code of its own.
+pub const VISIT_SITES: &[(&str, &str)] = &[
+    ("tahni", "https://web.archive.org/web/20011204210101/http://www.tahni.com/deskmate.php"),
+    ("fatb", "https://web.archive.org/web/20011117191049/http://fatb.oska.com/deskmate.php"),
+    ("maeka", "https://web.archive.org/web/20030207101939/http://www.maeka.com/deskmate.php"),
+    ("kahli", "https://web.archive.org/web/20011214204657/http://www.kahli.com/deskmate.php"),
+    ("teecee", "https://web.archive.org/web/20011118094820/http://www.teecee.net/deskmate.php"),
+    ("oska", "https://web.archive.org/web/20011117185101/http://www.oska.com/deskmate.php"),
+];
+
+/// The archived product page for one character, if we ship one for it.
+fn visit_url(character: &str) -> Option<&'static str> {
+    VISIT_SITES.iter().find(|(c, _)| *c == character).map(|(_, u)| *u)
+}
+
+/// Hand a URL to the OS default browser — the original's `ShellExecuteA`
+/// path. Fire-and-forget: no network code here, and a missing handler must
+/// never take the pet down.
+fn open_in_browser(url: &str) {
+    let spawned = {
+        #[cfg(target_os = "linux")]
+        {
+            std::process::Command::new("xdg-open").arg(url).spawn()
+        }
+        #[cfg(target_os = "macos")]
+        {
+            std::process::Command::new("open").arg(url).spawn()
+        }
+        #[cfg(windows)]
+        {
+            std::process::Command::new("cmd").args(["/C", "start", "", url]).spawn()
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+        {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "no browser launcher on this platform",
+            ))
+        }
+    };
+    if let Err(e) = spawned {
+        eprintln!("could not open {url} in the browser: {e}");
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -401,6 +453,7 @@ fn make_tray(
     let next = MenuItem::with_id("next", "Next scene", true, None);
     let settings = MenuItem::with_id("settings", "Settings…", true, None);
     let about = MenuItem::with_id("about", "About", true, None);
+    let visit = MenuItem::with_id("visit", format!("Visit {display}"), true, None);
     let chars = Submenu::new("Character", true);
     for c in CHARACTERS {
         let item = MenuItem::with_id(format!("char:{c}"), display_name(c), true, None);
@@ -422,7 +475,7 @@ fn make_tray(
         classic.append(&item).ok();
     }
     let quit = MenuItem::with_id("quit", "Quit", true, None);
-    menu.append_items(&[&toggle, &mv, &touch, &ask, &next, &chars, &settings, &about, &quit]).ok()?;
+    menu.append_items(&[&toggle, &mv, &touch, &ask, &next, &chars, &settings, &about, &visit, &quit]).ok()?;
     if !classic_items.is_empty() {
         menu.append(&classic).ok()?;
     }
@@ -464,6 +517,9 @@ const MENU: &[MenuItem] = &[
     MenuItem { label: "Settings…" },
     MenuItem { label: "Hide" },
     MenuItem { label: "About" },
+    // `{CHAR}` is substituted with the live character's display name when the
+    // overlay is drawn (see `render`), so one row serves all six characters.
+    MenuItem { label: "Visit {CHAR}" },
     MenuItem { label: "Quit" },
 ];
 
@@ -1046,6 +1102,13 @@ impl App {
                                 }
                             }
                             "About" => self.about_until = Some(Instant::now() + Duration::from_secs(8)),
+                            "Visit {CHAR}" => {
+                                if let Some(u) = visit_url(&self.character) {
+                                    open_in_browser(u);
+                                } else {
+                                    self.speak("No old web page for me — I'm a new character!");
+                                }
+                            }
                             "Quit" => std::process::exit(0),
                             _ => {}
                         }
@@ -1426,6 +1489,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         w.set_visible(true);
                         w.set_window_level(WindowLevel::AlwaysOnTop);
                         app.hidden_by_blank = false;
+                    }
+                }
+                ref id if id == "visit" => {
+                    if let Some(u) = visit_url(&app.character) {
+                        open_in_browser(u);
                     }
                 }
                 ref id if id.starts_with("char:") => app.switch_character(&id[5..]),
@@ -1991,5 +2059,35 @@ mod blit_tests {
         // non-premultiplied interp would store 150*191/255 = 112 (bleed).
         let o = 1 * 4;
         assert!(canvas[o] >= 140, "red must not darken by bleed: {:?}", &canvas[o..o + 4]);
+    }
+}
+
+#[cfg(test)]
+mod visit_tests {
+    use super::{visit_url, CHARACTERS, VISIT_SITES};
+
+    const P: &str = "https://web.archive.org/web/";
+
+    #[test]
+    fn every_shipped_character_has_an_archived_product_page() {
+        for c in CHARACTERS {
+            assert!(visit_url(c).is_some(), "no archived product page for {c}");
+        }
+    }
+
+    #[test]
+    fn visit_urls_are_https_wayback_captures() {
+        for (character, url) in VISIT_SITES {
+            assert!(url.starts_with(P), "{character}: not a wayback capture: {url}");
+            // .../<14-digit capture timestamp>/<original http(s) url>
+            let rest = &url[P.len()..];
+            let (ts, target) = rest.split_once('/').unwrap_or((rest, ""));
+            assert_eq!(ts.len(), 14, "{character}: bad capture timestamp: {ts}");
+            assert!(ts.chars().all(|c| c.is_ascii_digit()), "{character}: bad timestamp: {ts}");
+            assert!(
+                target.starts_with("http://") || target.starts_with("https://"),
+                "{character}: bad capture target: {target}"
+            );
+        }
     }
 }
