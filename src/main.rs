@@ -426,6 +426,8 @@ struct App {
     scale: f64,
     fw: u32,
     fh: u32,
+    /// Scene canvas size (unscaled) the window currently matches.
+    cur_dims: (u32, u32),
     matte: bool,
     character: String,
     display: String,
@@ -556,6 +558,26 @@ impl App {
         ((self.fw as f64 * self.scale) as u32, (self.fh as f64 * self.scale) as u32)
     }
 
+    /// Faithful to the original: the window IS the current scene's
+    /// canvas (the ActiveX buddy had no fixed box; each scene carries
+    /// its own canvas size and frames are authored against it). Resize
+    /// to the scene canvas on scene change, feet anchored in place.
+    fn sync_scene_window(&mut self) {
+        let Some(w) = self.window.clone() else { return };
+        let Some(sp) = self.pet.sprite() else { return };
+        let Some(scn) = self.scenes.scenes.get(&sp.scene) else { return };
+        if scn.w == self.cur_dims.0 && scn.h == self.cur_dims.1 {
+            return;
+        }
+        self.cur_dims = (scn.w, scn.h);
+        anchored_resize(
+            &w,
+            (scn.w as f64 * self.scale) as u32,
+            (scn.h as f64 * self.scale) as u32,
+        );
+        w.request_redraw();
+    }
+
     /// Hot-swap the playable character: reload scenes, rebuild pet, resize
     /// the window, persist choice, refresh tray tooltip.
     fn switch_character(&mut self, name: &str) {
@@ -570,7 +592,7 @@ impl App {
         let (fw, fh) = sc.frame_size();
         self.scenes = Arc::new(sc);
         self.fw = fw;
-        self.fh = fh;
+        self.cur_dims = (fw, fh);
         self.character = name.to_string();
         self.display = display_name(name);
         self.pet = Pet::new(self.scenes.clone(), load_config().adult);
@@ -586,7 +608,7 @@ impl App {
         self.menu_open = false;
         if let Some(w) = &self.window {
             let (lw, lh) = self.win_logical();
-            let _ = w.request_inner_size(LogicalSize::new(lw as f64, lh as f64));
+            anchored_resize(w, lw, lh);
             let _ = w.set_title(&format!("{} the Deskmate", self.display));
             w.request_redraw();
         }
@@ -899,6 +921,22 @@ impl App {
     }
 }
 
+/// Resize the window keeping the sprite's feet (bottom-center) pinned
+/// at their current screen position: x recenters by half the width
+/// delta, y shifts by the full height delta.
+fn anchored_resize(w: &Window, lw: u32, lh: u32) {
+    let sf = w.scale_factor();
+    let s = w.outer_size();
+    if let Ok(p) = w.outer_position() {
+        let tw = (lw as f64 * sf) as i32;
+        let th = (lh as f64 * sf) as i32;
+        let nx = p.x + (s.width as i32 - tw) / 2;
+        let ny = p.y + s.height as i32 - th;
+        w.set_outer_position(Position::Physical(PhysicalPosition::new(nx, ny)));
+    }
+    let _ = w.request_inner_size(LogicalSize::new(lw as f64, lh as f64));
+}
+
 fn blit(canvas: &mut [u8], cw: u32, ch: u32, img: &RgbaImage, x: i32, y: i32, scale: f64) {
     let (iw, ih) = img.dimensions();
     let dw = (iw as f64 * scale) as i32;
@@ -1136,6 +1174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         scale: cfg.scale,
         fw: fw0,
         fh: fh0,
+        cur_dims: (fw0, fh0),
         matte,
         audio: crate::audio::Audio::new(
             root.join("characters").join(&character).join("sounds"),
@@ -1354,7 +1393,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             save_state(app.window.as_deref(), next, &app.character);
                             if let Some(w) = &app.window {
                                 let (lw, lh) = app.win_logical();
-                                let _ = w.request_inner_size(LogicalSize::new(lw as f64, lh as f64));
+                                anchored_resize(w, lw, lh);
                             }
                         }
                     }
@@ -1465,6 +1504,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // scenes: the menu is painted inside the pet window, and a
                 // moving/resizing window makes menu clicks miss.
                 let mut changed = if app.menu_open { false } else { app.pet.tick(now) };
+                app.sync_scene_window();
                 if let Some(snd) = app.pet.take_sound() {
                     app.audio.play(&snd);
                 }
