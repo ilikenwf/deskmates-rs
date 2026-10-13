@@ -355,7 +355,8 @@ fn make_tray(display: &str) -> Option<tray_icon::TrayIcon> {
     use tray_icon::TrayIconBuilder;
     #[cfg(target_os = "linux")]
     {
-        if gtk::init().is_err() {
+        if let Err(e) = gtk::init() {
+            eprintln!("tray: gtk init failed: {e}");
             return None;
         }
     }
@@ -385,7 +386,7 @@ fn make_tray(display: &str) -> Option<tray_icon::TrayIcon> {
         .with_tooltip(format!("{display} the Deskmate"))
         .with_icon(icon)
         .build()
-        .ok()
+        .map_err(|e| eprintln!("tray: build failed: {e} (Plasma: check tray Settings > Entries - new items can be hidden by default)")).ok()
 }
 
 /// Left-button press state for drag-to-move. On X11 the drag is driven by
