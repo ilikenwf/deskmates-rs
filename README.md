@@ -141,6 +141,9 @@ cargo run -- --character kahli --scenes      # list Kahli's scene names
 
 Review mode shows gated scenes too (the adults-only gate is forced open);
 that's what it's for — it's how the `src/adult.rs` blocklist gets curated.
+The blocklist accepts **entry (sub-scene) names** as well as scene names:
+a gated entry name removes just that (scene, entry) pair from the random
+pools while the sibling entries of the same scene keep playing.
 The same flags work in all the sibling repos (deskmates3d-rs, arianna-rs, …;
 single-character forks like tavia-rs need no `--character`).
 

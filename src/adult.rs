@@ -11,8 +11,14 @@
 //! 2026-10-11): exposed breasts/genitals gate; butt-only views, topless
 //! males, and bikinis/high-cut leotards without exposure do not.
 
-/// Scene names considered adults-only. Scene names are character-prefixed
-/// and globally unique within a character's asset set.
+/// Names considered adults-only. Scene names are character-prefixed and
+/// globally unique within a character's asset set. **Entry (sub-scene)
+/// names are also valid here** (e.g. `kahli_s_action_b_a`, one entry of
+/// the `kahli_s_action_b` scene): the random-pool filter tests both the
+/// scene and the entry name of every (scene, entry) pair, so a single
+/// sub-scene can be gated while its sibling entries keep playing. The
+/// scene-browser (`--review`) marks and the classic/menu/tray sites are
+/// scene-level only.
 pub const ADULT_SCENES: &[&str] = &[
     // Tahni (2D)
     "shower",              // rear nude shower
@@ -62,21 +68,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gated_scenes_exist_in_shipped_assets() {
-        // Every gated name must actually exist in its character's packed
-        // scene set, otherwise the blocklist silently rots.
+    fn gated_names_exist_in_shipped_assets() {
+        // Every gated name must actually exist in a character's packed
+        // asset set — either as a scene container or as an entry
+        // (sub-scene) name inside one — otherwise the blocklist silently
+        // rots.
         let mut checked = 0;
         for c in ["tahni", "maeka", "kahli", "fatb"] {
             let dir = format!(
                 "{}/assets/characters/{c}/scenes",
                 env!("CARGO_MANIFEST_DIR")
             );
+            let scenes = crate::scenes::Scenes::load(
+                std::path::Path::new(&dir).parent().unwrap(),
+            )
+            .unwrap();
             for s in ADULT_SCENES {
-                if std::path::Path::new(&format!("{dir}/{s}.bin.gz")).exists() {
+                let is_scene = std::path::Path::new(&format!("{dir}/{s}.bin.gz")).exists();
+                let is_entry = scenes
+                    .scenes
+                    .values()
+                    .any(|sc| sc.entries.iter().any(|e| e == s));
+                if is_scene || is_entry {
                     checked += 1;
                 }
             }
         }
-        assert_eq!(checked, ADULT_SCENES.len(), "some gated scenes missing from assets");
+        assert_eq!(checked, ADULT_SCENES.len(), "some gated names missing from assets");
     }
 }

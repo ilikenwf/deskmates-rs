@@ -176,11 +176,24 @@ impl Pet {
     /// timer** — every completed script cycle drew one random def from
     /// the whole table (§1), so the voice lines ride the same shuffle-bag
     /// as the animations and fire once per cycle by pool share.
+    ///
+    /// The gate tests BOTH members of each (scene, entry) pair: an entry
+    /// (sub-scene) name in the blocklist removes just that pair while the
+    /// sibling entries of the same scene keep playing.
     fn pool(scenes: &Scenes, adult: bool) -> Vec<(String, String)> {
+        Self::pool_with(scenes, adult, crate::adult::is_adult)
+    }
+
+    /// `pool` with an injectable gate predicate (entry-level gating tests).
+    fn pool_with(
+        scenes: &Scenes,
+        adult: bool,
+        gated: impl Fn(&str) -> bool,
+    ) -> Vec<(String, String)> {
         let mut v: Vec<(String, String)> = scenes
             .all_entries()
             .into_iter()
-            .filter(|(s, _)| adult || !crate::adult::is_adult(s))
+            .filter(|(s, e)| adult || !(gated(s) || gated(e)))
             .collect();
         v.extend(Self::dialog_defs(scenes));
         v
@@ -667,5 +680,41 @@ mod gating_tests {
         let n = pool.iter().filter(|(_, e)| e.starts_with("dialog_")).count();
         assert!(n >= 10, "expected ambient dialog defs in the pool, got {n}");
         assert!(!pool.iter().any(|(_, e)| e == "dialog_buy_me_now"));
+    }
+
+    /// Entry-level gating: an entry (sub-scene) name in the blocklist
+    /// removes exactly that (scene, entry) pair from the default pool —
+    /// the sibling entries of the same scene keep playing.
+    #[test]
+    fn entry_level_gate_removes_only_the_named_pair() {
+        let sc = crate::scenes::Scenes::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/characters/tahni"),
+        )
+        .unwrap();
+        // A real multi-entry scene to gate one entry of.
+        let scene = sc
+            .scenes
+            .values()
+            .find(|s| !sc.behaviors.contains(&s.name) && s.entries.len() >= 2)
+            .expect("need a scene with >= 2 entries");
+        let gated = scene.entries[1].clone();
+        let pool = Pet::pool_with(&sc, false, |n| n == gated);
+        assert!(
+            !pool.iter().any(|(s, e)| *s == scene.name && *e == gated),
+            "gated entry {gated} leaked into the default pool"
+        );
+        for e in &scene.entries {
+            if *e == gated {
+                continue;
+            }
+            assert!(
+                pool.iter().any(|(s, x)| *s == scene.name && *x == *e),
+                "sibling entry {e} of {} was wrongly removed",
+                scene.name
+            );
+        }
+        // Adult mode still ships the gated pair.
+        let on = Pet::pool_with(&sc, true, |n| n == gated);
+        assert!(on.iter().any(|(s, e)| *s == scene.name && *e == gated));
     }
 }
