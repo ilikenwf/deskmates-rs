@@ -194,7 +194,10 @@ the `assets/` tree. Engine code in `src/` and `analysis/` is MIT.
       touch reactions, tray + in-app character switcher, zoom, shuffle-bag
       scene order (every scene plays before any repeats)
 - [x] Optional OpenAI-compatible chat ("Ask Tahni…", off by default)
-- [x] Adults-only scene gate (Settings checkbox, default off)
+- [x] Adults-only scene gate (Settings checkbox, default off) + optional
+      **prefer-adult** rotation (Settings checkbox): when unlocked, each
+      random scene draw picks an adults-only scene 60% of the time when
+      one is available
 - [x] Original FAZ assets loaded natively (`.bin.gz`, no PNG dumps)
 - [x] 3D characters (Tahni3D, Kahli3D) — see `deskmates3d-rs`
 - Sound effects and voice lines play from

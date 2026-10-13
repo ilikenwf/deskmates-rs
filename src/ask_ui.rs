@@ -22,7 +22,7 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes};
 
 const W: u32 = 460;
-const H: u32 = 300;
+const H: u32 = 330;
 const FIELDS: [&str; 3] = ["API endpoint (blank = offline)", "API key", "Model"];
 
 struct Ui {
@@ -42,6 +42,9 @@ struct Ui {
     /// Settings mode: adults-only content checkbox.
     adult: bool,
     adult_rect: (i32, i32, i32, i32),
+    /// Settings mode: prefer-adult rotation bias checkbox.
+    prefer_adult: bool,
+    prefer_rect: (i32, i32, i32, i32),
     /// Settings mode: roaming (walk/fence window movement) checkbox.
     walk: bool,
     walk_rect: (i32, i32, i32, i32),
@@ -157,6 +160,7 @@ impl Ui {
         cfg.agent_key = self.fields[1].trim().to_string();
         cfg.agent_model = self.fields[2].trim().to_string();
         cfg.adult = self.adult;
+        cfg.prefer_adult = self.prefer_adult;
         cfg.walk = self.walk;
         crate::save_config(&cfg);
         self.status = "Saved. Tahni reloads this automatically.".to_string();
@@ -175,6 +179,11 @@ impl Ui {
             let (rx, ry, rw, rh) = self.adult_rect;
             if x >= rx as f64 && x < (rx + rw) as f64 && y >= ry as f64 && y < (ry + rh) as f64 {
                 self.adult = !self.adult;
+                return;
+            }
+            let (rx, ry, rw, rh) = self.prefer_rect;
+            if x >= rx as f64 && x < (rx + rw) as f64 && y >= ry as f64 && y < (ry + rh) as f64 {
+                self.prefer_adult = !self.prefer_adult;
                 return;
             }
         }
@@ -327,7 +336,8 @@ impl Ui {
         let g2_top = g1_bot + 8.0 * s;
         let cb1 = g2_top + 16.0 * s;
         let cb2 = cb1 + t.box_px() as f32 + 8.0 * s;
-        let g2_bot = cb2 + t.box_px() as f32 + 7.0 * s;
+        let cb3 = cb2 + t.box_px() as f32 + 8.0 * s;
+        let g2_bot = cb3 + t.box_px() as f32 + 7.0 * s;
         let btn_y = g2_bot + 10.0 * s;
         let sb_h = (22.0 * s) as i32;
         let sb_y = h as i32 - sb_h;
@@ -369,8 +379,10 @@ impl Ui {
 
         retro::checkbox(&mut canvas, w, h, &self.font, &t, (m + ix) as i32, cb1 as i32, "Show adults-only scenes (nudity)", self.adult, false);
         self.adult_rect = (m as i32, cb1 as i32 - 3, gw, t.box_px() + 7);
-        retro::checkbox(&mut canvas, w, h, &self.font, &t, (m + ix) as i32, cb2 as i32, "Walk around the screen (pauses while you type)", self.walk, false);
-        self.walk_rect = (m as i32, cb2 as i32 - 3, gw, t.box_px() + 7);
+        retro::checkbox(&mut canvas, w, h, &self.font, &t, (m + ix) as i32, cb2 as i32, "Prefer adult scenes when unlocked", self.prefer_adult, !self.adult);
+        self.prefer_rect = (m as i32, cb2 as i32 - 3, gw, t.box_px() + 7);
+        retro::checkbox(&mut canvas, w, h, &self.font, &t, (m + ix) as i32, cb3 as i32, "Walk around the screen (pauses while you type)", self.walk, false);
+        self.walk_rect = (m as i32, cb3 as i32 - 3, gw, t.box_px() + 7);
 
         self.save_rect = retro::button(&mut canvas, w, h, &self.font, &t, m as i32, btn_y as i32, (90.0 * s) as i32, (25.0 * s) as i32, "Save", true, false, false);
         let help = "Click a field to edit. Enter saves. Esc closes. Ctrl+A/C/V/X, shift to select.";
@@ -400,6 +412,8 @@ pub fn run(ask: bool) -> Result<(), Box<dyn std::error::Error>> {
             [cfg.agent_endpoint, cfg.agent_key, cfg.agent_model]
         },
         adult: cfg.adult,
+        prefer_adult: cfg.prefer_adult,
+        prefer_rect: (0, 0, 0, 0),
         walk: cfg.walk,
         walk_rect: (0, 0, 0, 0),
         adult_rect: (0, 0, 0, 0),

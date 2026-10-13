@@ -103,6 +103,10 @@ pub struct Config {
     pub agent_model: String,
     /// Show adults-only (nudity) scenes; hidden from all random pools unless true.
     pub adult: bool,
+    /// With `adult` on, each random scene draw takes an adults-only scene
+    /// with 60% probability when one is available (settings checkbox).
+    #[serde(default)]
+    pub prefer_adult: bool,
     /// Scene names played during inter-scene gaps instead of blanking
     /// (classify with --scenes / --scene NAME).
     #[serde(default)]
@@ -114,7 +118,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { scale: 1.0, x: None, y: None, character: "tahni".into(), agent_endpoint: String::new(), agent_key: String::new(), agent_model: String::new(), adult: false, interstitial: Vec::new(), walk: true }
+        Config { scale: 1.0, x: None, y: None, character: "tahni".into(), agent_endpoint: String::new(), agent_key: String::new(), agent_model: String::new(), adult: false, prefer_adult: false, interstitial: Vec::new(), walk: true }
     }
 }
 
@@ -781,9 +785,11 @@ impl App {
         self.cur_dims = (fw, fh);
         self.character = name.to_string();
         self.display = display_name(name);
-        let adult = load_config().adult;
+        let cfg = load_config();
+        let adult = cfg.adult;
         self.adult = adult;
         self.pet = Pet::new(self.scenes.clone(), adult);
+        self.pet.set_prefer_adult(cfg.prefer_adult);
         // Rebind sound playback to the new character's sounds dir. The
         // WAV cache lives inside Audio keyed by bare name, so rebuilding
         // it here also stops same-named waves (LAND, SWOOSH_A, …) from
@@ -1419,6 +1425,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let font = FontArc::try_from_vec(std::fs::read(root.join("fonts/LiberationSans-Regular.ttf"))?)?;
     let mut pet = Pet::new(sc.clone(), cfg.adult);
     pet.interstitial = cfg.interstitial.clone();
+    pet.set_prefer_adult(cfg.prefer_adult);
     if let Some(s) = &scene_loop {
         if !pet.play_named(s) {
             eprintln!("no scene matching {s:?}; see --scenes");
@@ -2094,6 +2101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         app.agent.key = c.agent_key;
                         app.agent.model = c.agent_model;
                         app.pet.set_adult(c.adult);
+                        app.pet.set_prefer_adult(c.prefer_adult);
                         app.adult = c.adult;
                         for (scene, item) in &app.tray_classic {
                             item.set_enabled(c.adult || !adult::is_adult(scene));

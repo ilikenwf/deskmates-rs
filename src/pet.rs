@@ -13,6 +13,10 @@ use std::time::{Duration, Instant};
 use rand::seq::{IndexedRandom, SliceRandom};
 
 const TIME_REP: u32 = 1000;
+
+/// Probability a random draw takes the adult subpool when the gate is
+/// open and `prefer_adult` is on (config `prefer_adult`).
+const ADULT_PREF_P: f64 = 0.6;
 const MAX_DEPTH: usize = 24;
 
 #[derive(Clone, Debug)]
@@ -91,6 +95,12 @@ pub struct Pet {
     /// With `scene_loop`: loop that exact entry (sub-scene) instead of
     /// the scene's first entry point (set by the scene browser).
     pub scene_loop_entry: Option<String>,
+    /// Current adults-only gate state (mirrors the config; gates the
+    /// prefer-adult bias).
+    adult: bool,
+    /// With `adult`: each random draw takes an adults-only pair with
+    /// [`ADULT_PREF_P`] probability when the subpool has candidates.
+    prefer_adult: bool,
     /// Bubble text for a fired ambient line (host consumes via take_talk).
     pending_talk: Option<String>,
 }
@@ -148,6 +158,8 @@ impl Pet {
             gap_phase: 0,
             scene_loop: None,
             scene_loop_entry: None,
+            adult,
+            prefer_adult: false,
             pending_talk: None,
         };
         pet.start_random();
@@ -225,9 +237,32 @@ impl Pet {
 
     /// Toggle adults-only scenes; takes effect from the next scene onward.
     pub fn set_adult(&mut self, adult: bool) {
+        self.adult = adult;
         self.entries = Self::pool(&self.scenes, adult);
         self.bag.clear();
         self.bag_at = 0;
+    }
+
+    /// Toggle the prefer-adult rotation bias (config `prefer_adult`).
+    pub fn set_prefer_adult(&mut self, on: bool) {
+        self.prefer_adult = on;
+    }
+
+    /// Pool indices whose scene OR entry name is gated (the adult
+    /// subpool the prefer-adult bias draws from).
+    fn adult_pool(&self) -> Vec<usize> {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, (s, e))| crate::adult::is_adult(s) || crate::adult::is_adult(e))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Does this draw go to the adult subpool? `roll` is the injected
+    /// random value (0..1) so the bias is deterministically testable.
+    fn adult_pref_roll(&self, roll: f64) -> bool {
+        self.adult && self.prefer_adult && roll < ADULT_PREF_P && !self.adult_pool().is_empty()
     }
 
     pub fn sprite(&self) -> Option<&Sprite> {
@@ -445,6 +480,16 @@ impl Pet {
 
     fn start_random(&mut self) {
         if self.entries.is_empty() {
+            return;
+        }
+        // Prefer-adult bias: with the gate open and the bias on, 60% of
+        // draws come straight from the adult subpool when it has
+        // candidates; everything else rides the normal shuffle bag.
+        if self.adult_pref_roll(rand::rng().random::<f64>()) {
+            let sub = self.adult_pool();
+            let idx = sub[rand::rng().random_range(0..sub.len())];
+            let (scene, entry) = self.entries[idx].clone();
+            self.play(&scene, &entry);
             return;
         }
         if self.bag_at >= self.bag.len() {
@@ -746,5 +791,39 @@ mod gating_tests {
         // Adult mode still ships the gated pair.
         let on = Pet::pool_with(&sc, true, |n| n == gated);
         assert!(on.iter().any(|(s, e)| *s == scene.name && *e == gated));
+    }
+
+    /// D3: the prefer-adult bias fires on 60% of draws (deterministic
+    /// roll bounds + a seeded 1000-draw ratio check), only while the
+    /// gate itself is open.
+    #[test]
+    fn prefer_adult_roll_bounds_and_ratio() {
+        let sc = crate::scenes::Scenes::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/characters/tahni"),
+        )
+        .unwrap();
+        let mut pet = Pet::new(std::sync::Arc::new(sc), true);
+        assert!(!pet.adult_pool().is_empty(), "tahni ships gated scenes");
+        // Prefer off, or gate off: never biased.
+        pet.set_prefer_adult(false);
+        assert!(!pet.adult_pref_roll(0.0));
+        pet.set_adult(false);
+        pet.set_prefer_adult(true);
+        assert!(!pet.adult_pref_roll(0.0));
+        // Gate on + prefer on: rolls below 0.6 hit, at/above miss.
+        pet.set_adult(true);
+        assert!(pet.adult_pref_roll(0.599));
+        assert!(!pet.adult_pref_roll(0.6));
+        assert!(!pet.adult_pref_roll(0.999));
+        // 1000 seeded draws (xorshift LCG) land near the 60% target.
+        let mut state = 0x2545F4914F6CDD1Du64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let hits = (0..1000).filter(|_| pet.adult_pref_roll(next())).count();
+        assert!((500..=700).contains(&hits), "expected ~600/1000 adult-preferred draws, got {hits}");
     }
 }
