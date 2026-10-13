@@ -31,6 +31,12 @@ pub const ADULT_SCENES: &[&str] = &[
     "tahni_fashion_shoot", // topless star-cover frame
     "sailboard",           // topless on the board
     "tarzan",              // nude male (Tarzan) full-frontal
+    // Added from the user --review walkthrough (2026-10-13):
+    "beach",       // a voyeur leers at her — gated at user request
+    "dumb_eric",   // user-gated
+    "dumb_eric_b", // user-gated
+    "bambi_flash", // classic-set Bambii spot — gated; the Classic submenu +
+                   // tray disable it automatically when the gate is off
     // Maeka
     "maeka_creeper", // topless frames mid-scene
     "maeka_dancer",  // topless
