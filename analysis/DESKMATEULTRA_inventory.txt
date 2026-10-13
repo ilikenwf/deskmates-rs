@@ -1,0 +1,102 @@
+# DeskMateUltra.air — machine-readable inventory
+# Companion to DESKMATEULTRA_RE.md. Generated 2026-10-13 by static analysis only
+# (no code executed). Extraction root: ~/reference/oska-deskmates/ultra/
+#   unpacked package:  ultra/            (7z x app__dl__dmu__DeskMateUltra.air)
+#   SWF parse output:  ultra/extracted/  (swf_parse.py + lossless2png.py, same dir)
+
+## SWFs (md5 / size / uncompressed / fps / frames)
+22b58a6c241722dc88429932717d0a4b  DeskMateUltra.swf        694828 B  -> 1369002 B  24 fps   2 frames  (Flex 3, RDF date Jan 29 2010)
+0ce8a67d8c742330b960b0b4c401c1e9  assets/flash/DMU_intro.swf  65675 B ->  80050 B   24 fps 161 frames  (tutorial overlay)
+2cf021b5dc4eae202b3642c658ca3305  assets/flash/ProgressBar.swf 135872 B -> 170264 B 20 fps 236 frames  (UpdateProgressIndicator3)
+
+## ABC blocks (AVM2 bytecode, version 46.16)
+DMU_abc.frame1.abc   113130 B  1897 strings  Flex 3 framework shell (mx.*, SystemManager)
+DMU_abc.frame2.abc   945569 B  8804 strings  application code (com.deskmates.*)
+INTRO_abc            1583 B      55 strings   pure flash.display/events/media (no AIR)
+PBAR_abc              966 B      27 strings   pure flash.display/events (no AIR)
+
+## Embedded media in SWFs
+DeskMateUltra.swf: 102x DefineBitsLossless2 UI skins (mostly 30x30 button skins,
+  12x13 glyphs, 97x22 + 123x27 labels, 296x40 bar), 2x DefineFont3 (193 KB,
+  "VerdanaEmbedded" bold+medium), 1x DefineSound = 3340 B MP3 UI click
+  (embed_audio_click_mp3). NO character/video content embedded.
+DMU_intro.swf: 1x DefineBitsLossless2 143x170 (Trinity tutorial pose),
+  1x DefineSound 730 B MP3 click, 3x DefineButton2 (Next / Quit / TrinVids),
+  33x DefineText tutorial copy (embedded-font glyph runs).
+ProgressBar.swf: 201x DefineBitsLossless2 206x12 progress-strip frames +
+  1x 295x7; frame scripts at 21/236 dispatch DownDone/UpDone.
+Converted PNGs: ultra/extracted/*.png (305 files, RGBA).
+
+## Package files (non-SWF)
+META-INF/AIR/application.xml   AIR 1.5, id com.deskmateultra.DeskMateUltra, v1.4.6
+META-INF/AIR/hash              32 B, BAD CRC in zip (python zipfile aborts; 7z tolerates)
+META-INF/signatures.xml        166 KB Verisign code-signing blob
+mimetype                       application/vnd.adobe.air-application-installer-package+zip
+assets/dialog/                 23 HTML/XSL/CSS support-dialog files
+assets/dialog/js/              prototype.js 126 KB, effects.js 39 KB, dmu.js 18 KB,
+                               accordion.js, about.js, XmlStrings.js, prototype_update_helper.js
+assets/dialog/images/          TrinityPose.png, Uninstall.png, dmu_about.png, cvv.png,
+                               DialogBackground.png, Heading.png, Verisign.png,
+                               tsb_mv_white.jpg, tsb_ov_sailor.jpg, tsb_ss_speedy.jpg, ovals/arrows
+assets/dialog/wallpapers/TrinitySB/  60 JPG wallpapers 001_bloodcells.jpg .. 060_steppingout.jpg
+                               (+ Thumbs.db)
+assets/dialog/catalog.xml      product TrinitySB: clip_set 1 "TrinitySBDemo" (free),
+                               clip_set 2 "TrinitySB" (full, $29.95)
+assets/icons/                  icon_16/32/48/128.png
+
+## Gateway / service methods (from ABC strings)
+http://deskmateultra.com/app/gateway.php
+https://secure.oska.com/dmu/app/gateway.php          (secureGatewayUrl)
+http://dmu_dev.smileware.com.au:45002/app/gateway.php   (DEV LEAK)
+https://dmu_dev.smileware.com.au:44002/app/gateway.php  (DEV LEAK)
+http://dl.deskmateultra.com/                          (clip/wallpaper CDN root)
+http://www.deskmateultra.com/dmu_uninstall.php
+http://www.deskmateultra.com/strip-tease-videos.php[?product=TrinitySB]
+http://www.deskmateultra.com/strip-tease-mobile-videos.php?product=TrinitySB
+http://www.deskmateultra.com/strip-tease-slideshows.php?product=TrinitySB
+http://www.deskmateultra.com/strip-tease-wallpaper.php?wallpaperIdx=
+http://airdownload.adobe.com/air/browserapi/air.swf   (AIR browser-invocation bridge)
+https://seal.verisign.com/...                          (trust seal)
+Services (AMF0 over gateway.php): AccessService.callService, CryptoService.getCrypto,
+  SaleService.startSale, UpdateService; request/response VOs: GetListing, CheckRights,
+  TakeRight, CheckCustomerCode, GetMachineId, GetNotifications, PutNotification,
+  RecordNotificationProcessed, Heartbeat, MachineConfigChange, ReportError, StartSale,
+  GetCrypto.
+
+## AIR API surface used (ABC strings; Ruffle support = none)
+flash.desktop: NativeApplication, NativeWindow(+InitOptions/BoundsEvent/DisplayState/
+  SystemChrome/Type=UTILITY/Resize), NativeMenu(+Item), NativeDragManager(+Options/Events)
+flash.filesystem: File, FileStream, FileMode, applicationStorageDirectory,
+  applicationDirectory, createTempFile
+flash.net: Socket, (air.net.)SocketMonitor, URLLoader/URLStream downloads
+EncryptedLocalStore (DRM keys), HTMLLoader + FlexHTMLLoader (support dialogs),
+NetConnection/NetStream (progressive local FLV), Stage/StageVideo-less Video playback,
+allowBrowserInvocation (application.xml), Timer, NativeProcess: NOT used.
+
+## App classes (com.deskmates.*, from ABC)
+root: DeskMateUltra (Flex App), com.deskmates: ControlBar, Dialog, DragWindow,
+  DragWindowWard, Preferences, UninstallDlg, VideoLibrary, VideoWindow, WatchdogVideoDisplay
+containers: ChromelessWindow
+controls: BoldText, ControlBarButton, CustomButton, FormItem, HTML, LozengeButton,
+  NowPlaying, OffsetCheckBox, ProgressBar
+panels: About, Help, Message, More, Options, Order, Uninstall, Wallpaper;
+  panels.buy: BuyForm, UnlockForm, credit-card form items, SaleData;
+  panels.unlock: UnlockCodeTextInput
+ultra: Crypto, DownloadDetail, FadingPopup, IntroWindow, MachineId, MachineState,
+  Updater, UpdaterStage2; ultra.comms: Connection, CryptoConnection, ServiceConnection,
+  ErrorDetails; ultra.model: AirApp, Environment, RecentlyPlayList, notice.Notice(s),
+  support.Log/Message/Thread; ultra.vo: 20+ request/response VOs incl. ClipSet, ClipExtract,
+  ListingNode/ListingLeaf, Product, UserVo; utils: RemoteFile, StartupLock
+
+## Timeline / trigger labels
+DeskMateUltra.swf: frame labels "_DeskMateUltra_mx_managers_SystemManager", "DeskMateUltra"
+  (Flex init; frame numbers stripped by protector)
+DMU_intro.swf: scenes/labels "Scene 1", "tutorialStart", "tutorial", "quitting";
+  frame scripts at 20/40/55/70/85/100/115/130/146/161; events TutorialStarted, CLICK
+ProgressBar.swf: label "preplay"; frame scripts 21 (DownDone), 236 (UpDone)
+Runtime triggers (ABC): DEFAULT_IDLE_TIMEOUT_INTERVAL / idleTimeout / doIdleTimeout,
+  stage_mouseMoveHandler / stage_mouseLeaveHandler, keyInteraction, NATIVE_DRAG_*,
+  APPLICATION_ACTIVATE/DEACTIVATE, FULL_SCREEN_INTERACTIVE, Heartbeat timer,
+  playSequencesAutomatically, playSequencesImmediatelyOnStartup, fastSequenceGap,
+  showSequencesContaining{General,Mature}Content, StartupLock (single instance),
+  WatchdogVideoDisplay (playback stall watchdog).
