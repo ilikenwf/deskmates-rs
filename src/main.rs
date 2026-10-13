@@ -584,6 +584,8 @@ struct App {
     /// Current adults-only gate (mirrors config; drives the classic
     /// submenu visibility and the tray item enabled state).
     adult: bool,
+    /// Scene review mode (--review): (sorted scene names, current index).
+    review: Option<(Vec<String>, usize)>,
     /// User-idle state (MIT-SCREEN-SAVER): the original gated its actions
     /// on user inactivity; we gate roaming on it too.
     user_idle: bool,
@@ -690,6 +692,22 @@ fn clamp_rest(x: i32, y: i32, ww: i32, wh: i32, wa: (i32, i32, i32, i32)) -> (i3
     } else {
         (cx, cy)
     }
+}
+
+/// --review stepping: play scene idx+dir (wrapping), announce the name in
+/// stdout, the window title, and the speech bubble.
+fn review_step(app: &mut App, dir: i32) {
+    let Some((names, idx)) = &mut app.review else { return };
+    let n = names.len();
+    *idx = (*idx as i32 + dir).rem_euclid(n as i32) as usize;
+    let name = names[*idx].clone();
+    app.pet.play_named(&name);
+    app.pet.scene_loop = Some(name.clone());
+    println!("[review {}/{}] {name}", *idx + 1, n);
+    if let Some(w) = &app.window {
+        let _ = w.set_title(&format!("{}/{} {name}", *idx + 1, n));
+    }
+    app.bubble = Some((name, Instant::now() + Duration::from_secs(3600)));
 }
 
 impl App {
@@ -1368,6 +1386,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pet.scene_loop = Some(s.clone());
         }
     }
+    // --review: step through every scene by name (scene-list review aid).
+    // Right/Space = next, Left = back, Esc = quit; name in stdout + title +
+    // bubble. Shows gated scenes too — that is the point of the review.
+    let mut review: Option<(Vec<String>, usize)> = None;
+    if args.iter().any(|a| a == "--review") {
+        let mut names: Vec<String> = sc.scenes.keys().cloned().collect();
+        names.sort();
+        if names.is_empty() {
+            eprintln!("--review: no scenes loaded");
+        } else {
+            pet.set_adult(true);
+            pet.play_named(&names[0]);
+            pet.scene_loop = Some(names[0].clone());
+            println!("[review 1/{}] {}", names.len(), names[0]);
+            review = Some((names, 0));
+        }
+    }
     let mut agent_cfg = agent::AgentCfg {
         endpoint: cfg.agent_endpoint.clone(),
         key: cfg.agent_key.clone(),
@@ -1432,7 +1467,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         drew_content: true,
         blank_hide_after: None,
         move_mode: None,
+        review,
     };
+    if let Some((names, _)) = &app.review {
+        app.bubble = Some((names[0].clone(), Instant::now() + Duration::from_secs(3600)));
+    }
 
     // winit 0.30 picks the native Wayland backend when WAYLAND_DISPLAY is
     // set, and xdg-shell forbids client self-move — walking would do
@@ -1609,6 +1648,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 app.window = Some(window);
             }
             Event::WindowEvent { event, .. } => match event {
+                WindowEvent::KeyboardInput { event: k, .. }
+                    if k.state == ElementState::Pressed =>
+                {
+                    use winit::keyboard::{Key, NamedKey};
+                    match k.logical_key {
+                        Key::Named(NamedKey::Escape) => el.exit(),
+                        Key::Named(NamedKey::ArrowRight) => review_step(&mut app, 1),
+                        Key::Named(NamedKey::ArrowLeft) => review_step(&mut app, -1),
+                        Key::Named(NamedKey::Space) => review_step(&mut app, 1),
+                        _ => {}
+                    }
+                }
                 WindowEvent::Resized(size) => {
                     let (nw, nh) = (size.width.max(1), size.height.max(1));
                     if let Some(px) = &mut app.pixels {
