@@ -9,6 +9,7 @@
 //! The pet notices either via mtime polling and reloads.
 
 use crate::assets_root;
+use crate::retro;
 use crate::{draw_text, fill_rect, line_height, stroke_rect};
 use ab_glyph::FontArc;
 use ab_glyph::PxScale;
@@ -197,27 +198,50 @@ impl Ui {
     }
 
     fn render(&mut self) {
+        if self.ask {
+            self.render_ask();
+        } else {
+            self.render_settings();
+        }
+    }
+
+    /// Blit the RGBA scratch canvas to the swapchain.
+    fn present(&mut self, canvas: Vec<u8>) {
+        let Some(px) = &mut self.pixels else { return };
+        let frame = px.frame_mut();
+        for (dst, src) in frame.chunks_exact_mut(4).zip(canvas.chunks_exact(4)) {
+            let a = src[3] as u16;
+            dst[0] = (src[0] as u16 * a / 255) as u8;
+            dst[1] = (src[1] as u16 * a / 255) as u8;
+            dst[2] = (src[2] as u16 * a / 255) as u8;
+            dst[3] = a as u8;
+        }
+        let _ = px.render();
+    }
+
+    /// Ask dialog: keeps its own cream/pink look; the retro theme is a
+    /// settings-window-only treatment.
+    fn render_ask(&mut self) {
         let Some(window) = &self.window else { return };
         let (w, h) = self.size;
         let mut canvas = vec![0u8; (w as usize) * (h as usize) * 4];
         fill_rect(&mut canvas, w, h, 0, 0, w as i32, h as i32, [0xF4, 0xF4, 0xEC, 255]);
-        let sf = window.scale_factor() as f32;
-        let s = sf;
+        let s = window.scale_factor() as f32;
         let scale = PxScale { x: (15.0 * s).max(11.0), y: (15.0 * s).max(11.0) };
         let lh = line_height(&self.font, scale);
         let mut y = 14.0 * s + lh;
         draw_text(
-            &mut canvas, w, h, &self.font,
-            if self.ask { "Ask Tahni" } else { "DeskMates — agent settings" },
+            &mut canvas, w, h, &self.font, "Ask Tahni",
             14.0 * s, y,
             PxScale { x: scale.x * 1.15, y: scale.y * 1.15 },
             [0xB0, 0x30, 0x60, 255],
         );
         self.rects.clear();
         y += lh * 1.4;
-        for i in 0..if self.ask { 1 } else { 3 } {
-            let label = if self.ask { "Your question" } else { FIELDS[i] };
-            draw_text(&mut canvas, w, h, &self.font, label, 14.0 * s, y, scale, [0x33, 0x33, 0x33, 255]);
+        // The single question field.
+        {
+            let i = 0usize;
+            draw_text(&mut canvas, w, h, &self.font, "Your question", 14.0 * s, y, scale, [0x33, 0x33, 0x33, 255]);
             y += lh * 0.95;
             let (bx, by, bw, bh) = (
                 (14.0 * s) as i32,
@@ -232,11 +256,7 @@ impl Ui {
             if i == self.sel {
                 if let Some((a, b)) = self.sel_range() {
                     let x_at = |n: usize| -> f32 {
-                        let pre = if i == 1 {
-                            "•".repeat(n.min(8))
-                        } else {
-                            self.fields[i].chars().take(n).collect::<String>()
-                        };
+                        let pre = self.fields[i].chars().take(n).collect::<String>();
                         bx as f32 + 6.0 * s + crate::text_width(&self.font, &pre, scale)
                     };
                     fill_rect(
@@ -250,7 +270,7 @@ impl Ui {
             let shown = self.field_text(i);
             draw_text(&mut canvas, w, h, &self.font, &shown, bx as f32 + 6.0 * s, y + lh * 0.35, scale, [0, 0, 0, 255]);
             if i == self.sel && self.window.as_ref().is_some_and(|w| w.has_focus()) && self.frame_blink() {
-                let caret_shown = if i == 1 { "•".repeat(self.caret.min(8)) } else { self.fields[i].chars().take(self.caret).collect() };
+                let caret_shown: String = self.fields[i].chars().take(self.caret).collect();
                 let cx = bx as f32 + 6.0 * s
                     + crate::text_width(&self.font, &caret_shown, scale);
                 fill_rect(&mut canvas, w, h, cx as i32, (y - lh * 0.35) as i32, (2.0 * s).max(1.0) as i32, (lh * 1.2) as i32, [0, 0, 0, 255]);
@@ -258,56 +278,105 @@ impl Ui {
             self.rects.push((bx, by, bw, bh));
             y += lh * 1.35;
         }
-        if !self.ask {
-            let bs = (lh * 1.1) as i32;
-            let (bx, by) = ((14.0 * s) as i32, (y - lh * 0.35) as i32);
-            self.adult_rect = (bx, by - 4, (w as f32 - 28.0 * s) as i32, bs + 8);
-            fill_rect(&mut canvas, w, h, bx, by, bs, bs, [0xFF, 0xFF, 0xFF, 255]);
-            stroke_rect(&mut canvas, w, h, bx, by, bs, bs, [0x99, 0x99, 0x99, 255]);
-            if self.adult {
-                let q = bs / 4;
-                fill_rect(&mut canvas, w, h, bx + q, by + q, q * 2 + 1, q * 2 + 1, [0xB0, 0x30, 0x60, 255]);
-            }
-            draw_text(&mut canvas, w, h, &self.font, "Show adults-only scenes (nudity)", (bx + bs) as f32 + 8.0 * s, by as f32 + bs as f32 * 0.78, scale, [0x33, 0x33, 0x33, 255]);
-            y += lh * 1.7;
-            let (bx, by) = ((14.0 * s) as i32, (y - lh * 0.35) as i32);
-            self.walk_rect = (bx, by - 4, (w as f32 - 28.0 * s) as i32, bs + 8);
-            fill_rect(&mut canvas, w, h, bx, by, bs, bs, [0xFF, 0xFF, 0xFF, 255]);
-            stroke_rect(&mut canvas, w, h, bx, by, bs, bs, [0x99, 0x99, 0x99, 255]);
-            if self.walk {
-                let q = bs / 4;
-                fill_rect(&mut canvas, w, h, bx + q, by + q, q * 2 + 1, q * 2 + 1, [0xB0, 0x30, 0x60, 255]);
-            }
-            draw_text(&mut canvas, w, h, &self.font, "Walk around the screen (pauses while you type)", (bx + bs) as f32 + 8.0 * s, by as f32 + bs as f32 * 0.78, scale, [0x33, 0x33, 0x33, 255]);
-            y += lh * 1.7;
-        }
-        // Save / Ask button.
+        // Ask button.
         let (bx, by, bw, bh) = ((14.0 * s) as i32, y as i32, (110.0 * s) as i32, (lh * 1.7) as i32);
         fill_rect(&mut canvas, w, h, bx, by, bw, bh, [0xF8, 0xE0, 0xE8, 255]);
         stroke_rect(&mut canvas, w, h, bx, by, bw, bh, [0xB0, 0x30, 0x60, 255]);
-        draw_text(&mut canvas, w, h, &self.font, if self.ask { "Ask" } else { "Save" }, bx as f32 + bw as f32 / 2.0 - 16.0 * s, by as f32 + bh as f32 * 0.68, scale, [0xB0, 0x30, 0x60, 255]);
+        draw_text(&mut canvas, w, h, &self.font, "Ask", bx as f32 + bw as f32 / 2.0 - 16.0 * s, by as f32 + bh as f32 * 0.68, scale, [0xB0, 0x30, 0x60, 255]);
         self.save_rect = (bx, by, bw, bh);
         draw_text(&mut canvas, w, h, &self.font, &self.status, (bx + bw + 14) as f32, by as f32 + bh as f32 * 0.68, scale, [0x20, 0x60, 0x20, 255]);
         draw_text(
-            &mut canvas, w, h, &self.font,
-            if self.ask { "Enter asks. Esc closes." } else { "Click a field to edit. Enter saves. Esc closes. Ctrl+A/C/V/X, shift to select." },
+            &mut canvas, w, h, &self.font, "Enter asks. Esc closes.",
             14.0 * s,
             (by + bh) as f32 + lh * 1.3,
             scale,
             [0x60, 0x60, 0x60, 255],
         );
-        let _ = h;
+        self.present(canvas);
+    }
 
-        let Some(px) = &mut self.pixels else { return };
-        let frame = px.frame_mut();
-        for (dst, src) in frame.chunks_exact_mut(4).zip(canvas.chunks_exact(4)) {
-            let a = src[3] as u16;
-            dst[0] = (src[0] as u16 * a / 255) as u8;
-            dst[1] = (src[1] as u16 * a / 255) as u8;
-            dst[2] = (src[2] as u16 * a / 255) as u8;
-            dst[3] = a as u8;
+    /// Settings window: Win95 property-sheet look — a port of
+    /// bonzibuddy-rs `retro.rs` (see that module's docs for the palette
+    /// mapping). Same controls and order as before; only the paint is new.
+    fn render_settings(&mut self) {
+        let Some(window) = &self.window else { return };
+        let (w, h) = self.size;
+        let mut canvas = vec![0u8; (w as usize) * (h as usize) * 4];
+        let s = window.scale_factor() as f32;
+        let t = retro::apply_retro_theme(&mut canvas, w, h, s);
+        let lh = t.lh(&self.font);
+        self.rects.clear();
+
+        let m = 8.0 * s; // window margin
+        let ix = 16.0 * s; // inset inside the group borders
+        let gw = (w as f32 - 2.0 * m) as i32;
+        let fw = (w as f32 - 2.0 * (m + ix)) as i32;
+        let fh = (24.0 * s).round() as i32;
+
+        // Geometry pass: two etched group boxes, a Save button row and a
+        // sunken status bar along the bottom edge.
+        let g1_top = 12.0 * s;
+        let mut field_rects = [(0i32, 0i32, 0i32, 0i32); 3];
+        let mut y = g1_top + 14.0 * s;
+        for i in 0..3 {
+            y += lh + 3.0 * s; // label row
+            field_rects[i] = ((m + ix) as i32, y as i32, fw, fh);
+            y += fh as f32 + 7.0 * s;
         }
-        let _ = px.render();
+        let g1_bot = y + 2.0 * s;
+        let g2_top = g1_bot + 8.0 * s;
+        let cb1 = g2_top + 16.0 * s;
+        let cb2 = cb1 + t.box_px() as f32 + 8.0 * s;
+        let g2_bot = cb2 + t.box_px() as f32 + 7.0 * s;
+        let btn_y = g2_bot + 10.0 * s;
+        let sb_h = (22.0 * s) as i32;
+        let sb_y = h as i32 - sb_h;
+
+        // Frames first, contents on top.
+        retro::group(&mut canvas, w, h, &self.font, &t, m as i32, g1_top as i32, gw, (g1_bot - g1_top) as i32, "Agent connection", false);
+        retro::group(&mut canvas, w, h, &self.font, &t, m as i32, g2_top as i32, gw, (g2_bot - g2_top) as i32, "Pet behavior", false);
+
+        for i in 0..3 {
+            let (bx, by, bw, bh) = field_rects[i];
+            retro::label(&mut canvas, w, h, &self.font, &t, FIELDS[i], bx as f32, by as f32 - 4.0 * s, false);
+            retro::field(&mut canvas, w, h, bx, by, bw, bh, false);
+            let shown = self.field_text(i);
+            let tx = bx as f32 + 5.0 * s;
+            let baseline = by as f32 + (bh as f32 - lh) / 2.0 + lh;
+            let x_at = |n: usize| -> f32 {
+                let pre: String = shown.chars().take(n).collect();
+                tx + crate::text_width(&self.font, &pre, t.scale())
+            };
+            if i == self.sel {
+                if let Some((a, b)) = self.sel_range() {
+                    // Classic navy selection; the selected glyphs are
+                    // redrawn white on top.
+                    fill_rect(&mut canvas, w, h, x_at(a) as i32, by + 2, (x_at(b) - x_at(a)).max(0.0) as i32, bh - 4, retro::SELECTION);
+                }
+            }
+            retro::text(&mut canvas, w, h, &self.font, &t, &shown, tx, baseline, retro::TEXT);
+            if i == self.sel {
+                if let Some((a, b)) = self.sel_range() {
+                    let sub: String = shown.chars().skip(a).take(b - a).collect();
+                    retro::text(&mut canvas, w, h, &self.font, &t, &sub, x_at(a), baseline, retro::WHITE);
+                }
+                if self.window.as_ref().is_some_and(|win| win.has_focus()) && self.frame_blink() {
+                    fill_rect(&mut canvas, w, h, x_at(self.caret) as i32, by + 3, (2.0 * s).max(1.0) as i32, bh - 6, retro::DARK);
+                }
+            }
+            self.rects.push((bx, by, bw, bh));
+        }
+
+        retro::checkbox(&mut canvas, w, h, &self.font, &t, (m + ix) as i32, cb1 as i32, "Show adults-only scenes (nudity)", self.adult, false);
+        self.adult_rect = (m as i32, cb1 as i32 - 3, gw, t.box_px() + 7);
+        retro::checkbox(&mut canvas, w, h, &self.font, &t, (m + ix) as i32, cb2 as i32, "Walk around the screen (pauses while you type)", self.walk, false);
+        self.walk_rect = (m as i32, cb2 as i32 - 3, gw, t.box_px() + 7);
+
+        self.save_rect = retro::button(&mut canvas, w, h, &self.font, &t, m as i32, btn_y as i32, (90.0 * s) as i32, (25.0 * s) as i32, "Save", true, false, false);
+        let help = "Click a field to edit. Enter saves. Esc closes. Ctrl+A/C/V/X, shift to select.";
+        let msg = if self.status.is_empty() { help } else { &self.status };
+        retro::statusbar(&mut canvas, w, h, &self.font, &t, 0, sb_y, w as i32, sb_h, msg);
+        self.present(canvas);
     }
 
     fn frame_blink(&self) -> bool {

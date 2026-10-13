@@ -20,6 +20,7 @@ mod ask_ui;
 mod classic;
 mod faz;
 mod pet;
+mod retro;
 mod scenes;
 
 use ab_glyph::{point, Font, FontArc, PxScale, ScaleFont};
