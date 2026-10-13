@@ -107,7 +107,7 @@ Skipped (dedup / not playable):
   `sugar-n-spice-rs` (BUNDLE `SnS`) were dedup-surveyed: every scene in
   those bundle dirs is byte-identical to what those repos already ship,
   so there is nothing to wire (no classic set exists for them).
-  `deskmates3d-rs` (Tahni3D/Johlee) is out of scope by contract.
+- `deskmates3d-rs` — surveyed later (see below); no classic scene delta.
 - `extracted/Deskmate/Tahni 3.2 Full Unlock/Tahni Data` is md5-identical
   to the shipped set except `arnie.FAZ`/`scuba.FAZ`, which are the same
   v1.04 cuts as T104 (already covered above: placeholder / superseded by
@@ -116,3 +116,26 @@ Skipped (dedup / not playable):
   above). The `Tahni Deskmate 1.4.exe` / `Deskmate Tahni Full Pack.exe`
   installers were not unpacked (no `.exe` execution; IC payloads would
   need the static unpackers).
+
+## 3D line (`deskmates3d-rs`): zero classic delta
+
+Dedup of the 3D early sets against what `deskmates3d-rs` ships
+(same md5-of-FAZ-bytes method, `analysis/classic_survey.py`):
+
+| Source | Files | Byte-identical to shipped | New scenes |
+|---|---|---|---|
+| BUNDLE `Tahni3D/Data` | 76 | 75 | 0 |
+| BUNDLE `Johlee/Data` + IA `Johlee/…/Data` | 8 | 2 | 0 |
+| BUNDLE `Kahli/Data` (no `Kahli3D` dir exists) | 61 | 52 | 0 playable |
+
+Every `T3D_*` and `johlee_s_*` container in those dirs is already shipped
+as a scene or a `behaviors/` def bank — the provenance proof extends to
+the 3D line, so there is nothing to wire and no classic mechanism was
+ported into `deskmates3d-rs`.
+
+The only non-matches are def banks, not scenes: BUNDLE
+`Tahni3D/Data/common_enter.FAS` and the IA Johlee package's
+`common{,_demo,_enter,_enter_demo}.FAS` / `touch{,_demo}.FAS` (Johlee
+ships only `johlee_s_spidershootout_b` as a behavior). They are shared
+script banks whose defs the shipped scenes already resolve from the
+character's own banks, so they are not classic-mode material.
