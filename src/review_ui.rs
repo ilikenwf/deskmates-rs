@@ -15,8 +15,11 @@
 
 use crate::assets_root;
 use crate::retro;
-use crate::{display_name, CHARACTERS};
+use crate::display_name;
+use crate::line_height;
+use crate::CHARACTERS;
 use ab_glyph::FontArc;
+use ab_glyph::PxScale;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -30,6 +33,7 @@ const W: u32 = 520;
 const H: u32 = 640;
 
 /// One visible tree row: a scene (entry None) or one of its entries.
+#[derive(Clone)]
 struct Row {
     scene: String,
     entry: Option<String>,
@@ -56,6 +60,7 @@ struct Hit {
 fn in_rect(x: f64, y: f64, r: &(i32, i32, i32, i32)) -> bool {
     x >= r.0 as f64 && x < (r.0 + r.2) as f64 && y >= r.1 as f64 && y < (r.1 + r.3) as f64
 }
+
 
 /// The character's playable scenes, sorted: (scene name, entry names).
 /// Behaviors (common.FAS etc.) are def sources, never review rows.
@@ -90,6 +95,9 @@ struct Ui {
     pixels: Option<pixels::Pixels<'static>>,
     size: (u32, u32),
     mouse_pos: (f64, f64),
+    /// Last row this browser asked the pet to play: (scene, entry).
+    /// Rendered with a ▶ marker so the playing row is obvious.
+    playing: Option<(String, Option<String>)>,
 }
 
 impl Ui {
@@ -137,11 +145,12 @@ impl Ui {
         let _ = std::fs::write(&path, req);
     }
 
-    fn play_row(&self, row: &Row) {
+    fn play_row(&mut self, row: &Row) {
         match &row.entry {
             None => self.send(&format!("{}\n", row.scene)),
             Some(e) => self.send(&format!("{}\n{e}\n", row.scene)),
         }
+        self.playing = Some((row.scene.clone(), row.entry.clone()));
     }
 
     fn select_character(&mut self, idx: usize) {
@@ -205,35 +214,39 @@ impl Ui {
             return;
         }
         if in_rect(x, y, &self.tree_rect) {
-            for h in &self.hits {
-                if !in_rect(x, y, &h.rect) {
-                    continue;
-                }
-                let Some(row) = self.rows.get(h.row) else { continue };
-                match h.zone {
-                    Zone::Play => {
-                        self.play_row(row);
-                        self.status = format!("Playing {}.", row.name);
-                    }
-                    Zone::Mark => {
-                        if !self.marks.remove(&row.name) {
-                            self.marks.insert(row.name.clone());
-                        }
-                        self.set_title();
-                        self.status = format!(
-                            "{} marked — {} total. Export writes them.",
-                            row.name,
-                            self.marks.len()
-                        );
-                    }
-                    Zone::Toggle => {
-                        if !self.expanded.remove(&row.scene) {
-                            self.expanded.insert(row.scene.clone());
-                        }
-                        self.rebuild_rows();
-                    }
-                }
+            // Resolve the hit first, then act: the row borrow must end
+            // before the mutable play/mark/toggle handlers run.
+            let Some((rowi, zone)) = self
+                .hits
+                .iter()
+                .find(|h| in_rect(x, y, &h.rect))
+                .map(|h| (h.row, h.zone))
+            else {
                 return;
+            };
+            let Some(row) = self.rows.get(rowi).cloned() else { return };
+            match zone {
+                Zone::Play => {
+                    self.play_row(&row);
+                    self.status = format!("Playing {} on the pet.", row.name);
+                }
+                Zone::Mark => {
+                    if !self.marks.remove(&row.name) {
+                        self.marks.insert(row.name.clone());
+                    }
+                    self.set_title();
+                    self.status = format!(
+                        "{} marked — {} total. Export writes them.",
+                        row.name,
+                        self.marks.len()
+                    );
+                }
+                Zone::Toggle => {
+                    if !self.expanded.remove(&row.scene) {
+                        self.expanded.insert(row.scene.clone());
+                    }
+                    self.rebuild_rows();
+                }
             }
         }
     }
@@ -265,12 +278,23 @@ impl Ui {
         let _ = px.render();
     }
 
-    /// Visible row count for the current tree area (row height is fixed
-    /// by the theme scale).
-    fn visible_rows(&self) -> usize {
+    /// Row pitch in physical px: theme font line height + padding. The
+    /// scroll clamp and the row painter MUST use the same number, or the
+    /// list overflows the tree frame into the Export footer.
+    fn row_h(&self) -> f32 {
         let s = self.window.as_ref().map_or(1.0, |w| w.scale_factor()) as f32;
-        let row_h = (12.0 * s).max(10.0) + 6.0 * s;
-        ((self.tree_rect.3 - 6) as f32 / row_h) as usize
+        let px = (12.0 * s).max(10.0);
+        line_height(&self.font, PxScale { x: px, y: px }) + 6.0 * s
+    }
+
+    /// Column caption strip height inside the tree frame.
+    fn header_h(&self) -> i32 {
+        self.row_h().round() as i32
+    }
+
+    /// Visible row count for the current tree area.
+    fn visible_rows(&self) -> usize {
+        ((self.tree_rect.3 - self.header_h() - 6) as f32 / self.row_h()).max(0.0) as usize
     }
 
     fn render(&mut self) {
@@ -313,7 +337,10 @@ impl Ui {
             &mut canvas, w, h, &self.font, &t,
             m as i32, btn_y, btn_w, btn_h, "Export", true, false, false,
         );
-        let marked = format!("{} marked", self.marks.len());
+        let marked = format!(
+            "{} marked — click a name to play it on the pet; tick gate? to mark, Export to save.",
+            self.marks.len()
+        );
         retro::statusbar(
             &mut canvas, w, h, &self.font, &t,
             0, sb_y, w as i32, sb_h,
@@ -327,13 +354,26 @@ impl Ui {
         let th = btn_y - ty - (8.0 * s) as i32;
         self.tree_rect = (tx, ty, tw, th);
         retro::sunken(&mut canvas, w, h, tx, ty, tw, th, retro::WHITE);
-        let row_h = (lh + 6.0 * s) as i32;
+        let row_h = self.row_h().round() as i32;
         let gate_x = tx + tw - (150.0 * s) as i32;
         let mark_x = tx + tw - (80.0 * s) as i32;
+        let sep_x = gate_x - (14.0 * s) as i32;
+        // Column caption strip: makes the click-to-play name cell and the
+        // gate-mark checkbox column visually distinct zones.
+        let hh = self.header_h();
+        crate::fill_rect(&mut canvas, w, h, tx + 2, ty + 2, tw - 4, hh, retro::FACE);
+        let hbase = ty as f32 + 2.0 + (hh as f32 - lh) / 2.0 + lh;
+        retro::text(&mut canvas, w, h, &self.font, &t, "name — click to play", tx as f32 + 8.0 * s, hbase, retro::SHADOW);
+        retro::text(&mut canvas, w, h, &self.font, &t, "adult", gate_x as f32, hbase, retro::SHADOW);
+        retro::text(&mut canvas, w, h, &self.font, &t, "gate?", mark_x as f32 - 6.0 * s, hbase, retro::SHADOW);
+        crate::fill_rect(&mut canvas, w, h, sep_x, ty + 2, 1, th - 4, retro::SHADOW);
         let vis = self.visible_rows();
         for (vi, ri) in (self.scroll..self.rows.len()).enumerate().take(vis) {
             let row = &self.rows[ri];
-            let y = ty + 3 + (vi as i32) * row_h;
+            let y = ty + 2 + hh + (vi as i32) * row_h;
+            if y + row_h > ty + th {
+                break; // never paint over the footer
+            }
             let baseline = y as f32 + (row_h as f32 - lh) / 2.0 + lh;
             let (tri_w, name_x);
             if row.entry.is_none() {
@@ -353,11 +393,32 @@ impl Ui {
                 tri_w = 0;
                 name_x = tx as f32 + 28.0 * s;
             }
+            let play_rect = (tx + tri_w, y, (sep_x - tx - tri_w).max(1), row_h);
+            let hover = in_rect(self.mouse_pos.0, self.mouse_pos.1, &play_rect);
+            if hover {
+                // Classic navy highlight: the name cell is a play button.
+                crate::fill_rect(&mut canvas, w, h, tx + tri_w + 1, y, (sep_x - tx - tri_w - 2).max(1), row_h, retro::SELECTION);
+            }
             retro::text(
                 &mut canvas, w, h, &self.font, &t,
                 &row.name, name_x, baseline,
-                if row.entry.is_none() { retro::TEXT } else { retro::SHADOW },
+                if hover {
+                    retro::WHITE
+                } else if row.entry.is_none() {
+                    retro::TEXT
+                } else {
+                    retro::SHADOW
+                },
             );
+            if self.playing.as_ref().is_some_and(|(s, e)| *s == row.scene && *e == row.entry) {
+                // U+25BA (right-pointing pointer, reads as ▶): the bundled
+                // Liberation Sans lacks U+25B6, which would draw tofu.
+                retro::text(
+                    &mut canvas, w, h, &self.font, &t,
+                    "\u{25ba}", (sep_x - (18.0 * s) as i32) as f32, baseline,
+                    if hover { retro::WHITE } else { retro::SELECTION },
+                );
+            }
             retro::text(
                 &mut canvas, w, h, &self.font, &t,
                 if row.gated { "[x] adult" } else { "[ ]" },
@@ -371,7 +432,7 @@ impl Ui {
             self.hits.push(Hit {
                 row: ri,
                 zone: Zone::Play,
-                rect: (tx + tri_w, y, (gate_x - tx - tri_w - (4.0 * s) as i32).max(1), row_h),
+                rect: play_rect,
             });
             self.hits.push(Hit {
                 row: ri,
@@ -438,6 +499,7 @@ pub fn run(character: &str) -> Result<(), Box<dyn std::error::Error>> {
         pixels: None,
         size: (W, H),
         mouse_pos: (0.0, 0.0),
+        playing: None,
     };
     ui.rebuild_rows();
 
@@ -490,7 +552,10 @@ pub fn run(character: &str) -> Result<(), Box<dyn std::error::Error>> {
                 el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250)));
             }
             WindowEvent::CursorMoved { position, .. } => {
-                ui.mouse_pos = (position.x, position.y);
+                // Rects are painted in physical px; winit delivers logical.
+                let sf = ui.window.as_ref().map_or(1.0, |w| w.scale_factor());
+                ui.mouse_pos = (position.x * sf, position.y * sf);
+                ui.window.as_ref().map(|w| w.request_redraw());
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                 let (x, y) = ui.mouse_pos;
