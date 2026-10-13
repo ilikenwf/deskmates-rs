@@ -333,12 +333,12 @@ fn assets_root() -> std::path::PathBuf {
 }
 
 /// All playable characters shipped under assets/characters/.
-const CHARACTERS: &[&str] = &["tahni", "fatb", "maeka", "kahli"];
+const CHARACTERS: &[&str] = &["tahni", "fatb", "maeka", "kahli", "teecee", "johlee", "oska"];
 
 fn display_name(character: &str) -> String {
     match character {
         "fatb" => "FatB".to_string(),
-        "dm05" => "DM05".to_string(),
+        "teecee" => "TeeCee".to_string(),
         "sns" => "SnS".to_string(),
         other => {
             let mut c = other.chars();

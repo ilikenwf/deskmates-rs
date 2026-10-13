@@ -156,7 +156,55 @@ def extract(char):
                 print(f'{char}: {fname} stream not found (size {rawsz})')
 
 
+def extract_tree(char):
+    """Recovered (already-unpacked) tree from the archive.org archaeology
+    (cdx-findings/extracted/*_tree) -> repo asset layout:
+    *.FAZ -> scenes/<name>.bin.gz, *.FAS -> behaviors/<name>.fas.gz,
+    DeskMate.WAS / DeskMates.Wa3 -> sounds/*.wav.gz."""
+    tdir = os.path.join(CDX, TREES[char])
+    out = os.path.join(REPOS, 'deskmates-rs', 'assets/characters', char)
+    n_sc = n_be = n_sn = 0
+    for f in sorted(os.listdir(tdir)):
+        src = os.path.join(tdir, f)
+        up = f.upper()
+        if up.endswith('.FAZ'):
+            dst = os.path.join(out, 'scenes', f.lower()[:-4] + '.bin.gz')
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with open(src, 'rb') as fh, gzip.open(dst, 'wb', 6) as g:
+                g.write(fh.read())
+            n_sc += 1
+        elif up.endswith('.FAS'):
+            dst = os.path.join(out, 'behaviors', f.lower()[:-4] + '.fas.gz')
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with open(src, 'rb') as fh, gzip.open(dst, 'wb', 6) as g:
+                g.write(fh.read())
+            n_be += 1
+        elif up in ('DESKMATE.WAS', 'DESKMATES.WA3'):
+            data = open(src, 'rb').read()
+            splitter = split_wa3 if up.endswith('WA3') else split_was
+            sounds = splitter(data)
+            sdir = os.path.join(out, 'sounds')
+            os.makedirs(sdir, exist_ok=True)
+            for n, wav in sounds.items():
+                with gzip.open(os.path.join(sdir, n.upper() + '.wav.gz'), 'wb', 6) as g:
+                    g.write(wav)
+            n_sn += len(sounds)
+    print(f'{char}: {n_sc} scenes, {n_be} behaviors, {n_sn} sounds')
+
+
+CDX = os.path.expanduser('~/reference/oska-deskmates/cdx-findings/extracted')
+TREES = {
+    'teecee': 'TeeCee_tree',
+    'johlee': 'Johlee_tree',
+    'oska':   'Oska_tree',
+}
+
+
 if __name__ == '__main__':
-    todo = sys.argv[1:] or list(CHARS)
-    for c in todo:
-        extract(c)
+    argv = sys.argv[1:]
+    if argv and argv[0] == '--tree':
+        for c in argv[1:]:
+            extract_tree(c)
+    else:
+        for c in (argv or list(CHARS)):
+            extract(c)
