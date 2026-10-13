@@ -254,3 +254,122 @@ EOF for all three SWFs, ABC v46.16 constant-pool string extraction (10,782
 strings total), DefineBitsLossless2→PNG round-trip (305 PNGs, `file(1)`
 confirms dimensions), MP3 frame-sync check on extracted audio. No Flash, AIR,
 or ActionScript code was executed at any point.
+
+## 7. Content recovery (2026-10-13 Wayback/IA sweep)
+
+Follow-up to §6 step 1. Static + network-fetch only (raw Wayback `id_` fetches;
+nothing executed). Corpus: `~/reference/oska-deskmates/ultra/flvs/` (353 media
+files, 126.3 MB) + `flvs/pages/` (29 captured site pages); per-file
+name/size/md5/sha256/capture-ts/source-url in
+[`DESKMATEULTRA_recovery_inventory.txt`](DESKMATEULTRA_recovery_inventory.txt)
+(382 rows; `flvs/manifest.tsv` is the resumable fetch log).
+
+### Sweep stats (CDX, `collapse=urlkey` unless noted)
+
+| sweep | rows | outcome |
+|---|---|---|
+| `deskmateultra.com` (domain) | 514 | 316 status-200 media rows → 353 OK files after multi-ts fetches |
+| `dl.deskmateultra.com` (domain) | 4 | only `DeskMateUltra.air` (302) + robots — clip CDN never crawled |
+| `secure.oska.com/dmu` (prefix) | 0 | gateway + store paths never archived |
+| `dmu_dev.smileware.com.au`, `smileware.com.au` | 0 | dev-leak host absent from index (ports 45002/44002 uncrawled) |
+| `oska.com` (domain, prior 74,273-row dump) | — | no `.flv`/`.mp4` anywhere; `dmu.oska.com` = 3 affiliate banners; `images.oska.com` is an unrelated fashion brand |
+
+`gateway.php`: **zero captures on every DMU host** (`deskmateultra.com/app/*`
+was never crawled; the lone 2001-era `secure.oska.com:80/gateway.php` capture
+is a dead soft-404). No `GetListing` response body exists in the index. A
+no-`collapse` `filter=original:.*\.flv` query over the whole domain returns
+**empty — not one `.flv` capture exists** for this product line. IA item
+searches (`deskmateultra`, `"trinity sb"`, `stripsaver`, `"trinity sunset
+boulevard"`, `"trinity porter"`, `oska AND ultra`): **0 relevant items** —
+the 112 `deskmate`/10 `oska` software hits are all 1st/2nd-gen line
+(`Deskmates`, `more-deskmates`, `tahni-deskmate-1.04`, `tucows_287874`, …).
+
+### The one hard clip-naming win
+
+`tsb_videos.swf` (174 KB, recovered; AS2/AVM1, `mx.video.FLVPlayback` — the
+player embedded by `strip-tease-videos.php`) contains the only concrete FLV
+paths ever recovered:
+
+```
+http://www.deskmateultra.com/tsb_ov_sailor.flv
+http://www.deskmateultra.com/tsb_ov_speedy.flv
+http://www.deskmateultra.com/tsb_ov_white.flv
+```
+
+None of the three was ever archived (CDX empty for each). The `tsb_ov_<clip>.flv`
+pattern ("ov" = overview) confirms desktop FLVs sat at the web root; the
+paywalled full set would have streamed from the never-crawled
+`dl.deskmateultra.com` / `…/app/dl/dmu/` path.
+
+### Recovered video — the free demo clips (12 files)
+
+`strip-tease-mobile-videos.php` gave away 3 demo sequences × 2 rating cuts
+(base = **Mature**, `_g` = **General**), each in iPhone (352×288 H.264/AAC)
+and 3GP (176×144) transcodes — all 12 captured 2010-09-20 and recovered:
+
+| sequence | cut | m4v (size, md5) | 3gp (size, md5) | dur |
+|---|---|---|---|---|
+| Ship Ahoy! (sailor) | Mature | 11,831,741 `fab18973…` | 2,965,211 `acf08854…` | 110.0 s |
+| Ship Ahoy! | General | 6,515,914 `89270f5f…` | 1,667,141 `316e778b…` | 61.0 s |
+| Go Go Speedy (speedy) | Mature | 6,968,863 `bf471fb4…` | 1,765,686 `f7005f81…` | 65.7 s |
+| Go Go Speedy | General | 4,883,988 `082beec0…` | 1,219,591 `ed67469c…` | 44.9 s |
+| White Pearl (white) | Mature | 18,036,545 `771a5dfc…` | 4,491,368 `e748866a…` | 165.0 s |
+| White Pearl | General | 11,108,200 `4fccd8ca…` | 2,821,840 `497ac120…` | 101.8 s |
+
+(full sha256 + capture ts in the inventory; magic-validated `ftyp`, ffprobe'd).
+~9.1 min of unique footage (548 s across both cuts). Sequence titles also
+confirmed by `strip-tease-screenshots.php` alts: Pole Dancing, Schoolgirl,
+White Fur, German Girl, Speed Racer Girl, Sailor Girl.
+
+### Recovered non-video content
+
+- **54 full-resolution 1600×1200 wallpapers** (`TrinitySB_<title>.jpg` +
+  thumbs) from `deskmateultra.com/wallpapers/` — the `.air` ships only
+  158×138 preview thumbnails, so these are genuinely new (0 byte-identical
+  matches; same shoots, dialog-grid titles map 1:1 to the numbered thumbs).
+- **9 SWFs**: `tsb_videos.swf` (the web jukebox), `DMU_ControlBox.swf`
+  (web mock of the control bar), `tsb_flash_buttons(_trailer).swf` (store
+  CTAs), `tsb_flash_seal.swf`, `AIRInstallBadge.swf`, `expressinstall.swf`,
+  2 parked-domain junk `Promo_*_embed.swf` (bodisparking artifacts, kept for
+  the record).
+- **~35 `tsb_support_*.jpg` app-UI screenshots** (install/uninstall/options/
+  unlock flows — direct reference art for a Rust shell), 6 sequence promo
+  banners (`strip-tease-{pole,schoolgirl,white,german,speedy,sailor}.png`),
+  promo/store jpgs, affiliate banners (incl. 3 from `dmu.oska.com`), site chrome.
+- **29 site HTML pages** incl. `strip-tease-videos.php` (player embed),
+  `dl1d.php` (the `dl.deskmateultra.com/DeskMateUltra.air` funnel), and the
+  110 KB `strip-tease-support_temp.php` user manual.
+
+### Still lost
+
+- **The entire paywalled TrinitySB full set** (the $29.95 "Strips & Pole
+  Dances" — clip count unknown): served post-unlock from never-crawled
+  hosts, no IA copies, no user-uploaded pack found. Gone.
+- The three `tsb_ov_*.flv` desktop demo FLVs (names known, bytes gone — only
+  the mobile transcodes above survive).
+- `GetListing`/gateway payloads, tutorial prose (unchanged from §3).
+
+### Verdict: is a Rust Ultra shell worth building?
+
+**Yes, as a demo-grade shell.** §6's blocking condition is met: there is now
+real payload — 3 sequences × 2 cuts of playable H.264 (ffmpeg-decodable),
+54 real 1600×1200 wallpapers, 61 preview thumbs, the 305 extracted UI skins,
+~35 UI screenshots, and the web control-box mock. A faithful reimplementation
+of the *free TrinitySBDemo experience* (transparent control bar, playlist over
+the 6 m4v clips, mature/general content filter — the cuts are literally
+different files, idle-timeout trigger, wallpaper panel) is fully buildable
+offline. The full-set experience is not: the shell must ship demo-only with no
+unlock path, and that is the honest ceiling.
+
+**Licensing**: every recovered asset remains © Oska Educational Systems Pty
+Ltd (trademarks notice on every page; Verisign-signed 2010 package). This is
+local preservation/research material under `~/reference/` — do not
+redistribute clips or wallpapers with any shell.
+
+### §7 verification performed
+
+CDX sweeps cached under `/tmp/cdx/dmu_*.txt`; every download magic-validated
+(ftyp/FLV/GIF/PNG/JPEG/FWS-CWS-ZWS signatures; 170 soft-404/parked rows logged
+FAIL and discarded), sha256-deduped (5 dupes), videos ffprobe'd (codecs,
+durations above). SWF string mining was static (zlib inflate + constant-pool
+scan / `swf_parse.py`). No archived code was executed.
