@@ -1111,7 +1111,9 @@ impl App {
                         self.menu_open = false;
                         self.classic_open = false;
                         match MENU[i].label {
-                            "Touch" => self.pet.touch(),
+                            // Review mode: clicks must never hijack the scene
+                            // under review with a touch reaction.
+                            "Touch" if self.review.is_none() => self.pet.touch(),
                             "Ask…" => {
                                 if self.agent.enabled() {
                                     fork_child("--ask-ui");
@@ -1528,7 +1530,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         app.blank_hide_after = Some(Instant::now() + Duration::from_secs(4));
                     }
                 }
-                ref id if id == "touch" => app.pet.touch(),
+                ref id if id == "touch" && app.review.is_none() => app.pet.touch(),
                 ref id if id == "ask" => {
                     if app.agent.enabled() {
                         fork_child("--ask-ui");
@@ -1768,7 +1770,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     // Native sprite coords for the hotspot map.
                                     let sf = app.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0);
                                     let d = (app.scale * sf).max(0.01);
-                                    app.pet.touch_at(mx / d, my / d);
+                                    if app.review.is_none() { app.pet.touch_at(mx / d, my / d); }
                                 }
                                 if let Some(w) = &app.window {
                                     w.request_redraw();
@@ -1969,7 +1971,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Some(name) => {
                                     app.pet.play_named(name);
                                 }
-                                None => {}
+                                None => {
+                                    // No stage direction: repurpose the
+                                    // original email-check scene if this
+                                    // character ships one (kahli, maeka and
+                                    // oska do; others no-op and keep the
+                                    // current animation).
+                                    app.pet.play_named("email");
+                                }
                             }
                             app.speak(&speech);
                         }
