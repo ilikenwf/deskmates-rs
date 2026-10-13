@@ -130,10 +130,19 @@ transparency.
 `--scene NAME` loops a single scene; and `--review` steps through the whole
 set one scene at a time — **→/Space** next, **←** back, **Esc** quit — with
 the scene name shown in the window title, the speech bubble, and on stdout
-(`[review 42/132 tahni_kiss]`) so you can copy names as you go. Review mode
-shows gated scenes too (the adults-only gate is forced open); that's what
-it's for — it's how the `src/adult.rs` blocklist gets curated. The same
-flag works in all the sibling repos (deskmates3d-rs, arianna-rs, …).
+(`[review 42/132 tahni_kiss]`) so you can copy names as you go. Combine with
+`--character` to review one character's set:
+
+```sh
+cargo run -- --review                        # tahni (default), all scenes
+cargo run -- --character fatb --review       # just FatB's set
+cargo run -- --character kahli --scenes      # list Kahli's scene names
+```
+
+Review mode shows gated scenes too (the adults-only gate is forced open);
+that's what it's for — it's how the `src/adult.rs` blocklist gets curated.
+The same flags work in all the sibling repos (deskmates3d-rs, arianna-rs, …;
+single-character forks like tavia-rs need no `--character`).
 
 **Visit <character>** is the original's `ShellExecuteA` menu item, kept: it
 hands the earliest Wayback capture of that character's period product page
