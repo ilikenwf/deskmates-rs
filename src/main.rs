@@ -356,7 +356,7 @@ fn assets_root() -> std::path::PathBuf {
 }
 
 /// All playable characters shipped under assets/characters/.
-const CHARACTERS: &[&str] = &["tahni", "fatb", "maeka", "kahli", "teecee", "johlee", "oska"];
+const CHARACTERS: &[&str] = &["tahni", "fatb", "maeka", "kahli", "teecee", "oska"];
 
 fn display_name(character: &str) -> String {
     match character {
@@ -1120,6 +1120,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|i| args.get(i + 1))
         .cloned()
         .unwrap_or(cfg.character.clone());
+    let character = if CHARACTERS.contains(&character.as_str()) {
+        character
+    } else {
+        eprintln!("character '{character}' is not shipped (Johlee moved to deskmates3d-rs); using default");
+        "tahni".to_string()
+    };
     let display = display_name(&character);
     // `--all`: one instance per character, fanned out along the bottom edge.
     if args.iter().any(|a| a == "--all") {
