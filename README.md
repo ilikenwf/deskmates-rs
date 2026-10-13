@@ -127,11 +127,18 @@ desktops without a compositor). On Linux a compositor is required for true
 transparency.
 
 **Scene review.** `--scenes` prints every scene name and exits;
-`--scene NAME` loops a single scene; and `--review` steps through the whole
-set one scene at a time — **→/Space** next, **←** back, **Esc** quit — with
-the scene name shown in the window title, the speech bubble, and on stdout
-(`[review 42/132 tahni_kiss]`) so you can copy names as you go. Combine with
-`--character` to review one character's set:
+`--scene NAME` loops a single scene; and `--review` opens a **scene-browser
+window** next to the pet: a scrollable tree of every scene, expandable to
+its entries (sub-scenes), with a character dropdown, a `[x] adult` marker on
+gated rows, and a per-row checkbox. Click a scene or entry row to play it
+on the pet (it loops until you click another row — nothing hijacks the
+scene under review); mark the rows that need gating and hit **Export** to
+write the marked names (one per line) to `~/.config/deskmates-rs.marks`
+and print them to stdout — that's how the `src/adult.rs` blocklist gets
+curated. The window title shows the mark count. If the browser cannot
+start, `--review` falls back to the old keyboard stepping: **→/Space**
+next, **←** back, **Esc** quit, name on stdout (`[review 42/132
+tahni_kiss]`). Combine with `--character` to review one character's set:
 
 ```sh
 cargo run -- --review                        # tahni (default), all scenes

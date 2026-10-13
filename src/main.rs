@@ -21,6 +21,7 @@ mod classic;
 mod faz;
 mod pet;
 mod retro;
+mod review_ui;
 mod scenes;
 
 use ab_glyph::{point, Font, FontArc, PxScale, ScaleFont};
@@ -172,16 +173,39 @@ fn ask_mtime() -> Option<std::time::SystemTime> {
     std::fs::metadata(ask_path()).ok().and_then(|m| m.modified().ok())
 }
 
+/// Play handoff file written by the forked scene-browser window:
+/// `scene\nentry` (empty entry = whole scene) or `switch:<character>`,
+/// mtime-polled by the pet loop exactly like the ask file.
+pub fn play_path() -> std::path::PathBuf {
+    config_path()
+        .map(|p| p.with_extension("play"))
+        .unwrap_or_else(|| std::path::PathBuf::from("deskmates-rs.play"))
+}
+
+fn play_mtime() -> Option<std::time::SystemTime> {
+    std::fs::metadata(play_path()).ok().and_then(|m| m.modified().ok())
+}
+
+/// Mark-export file written by the scene browser's Export button: the
+/// names the user wants gated, one per line (also printed to stdout).
+pub fn marks_path() -> std::path::PathBuf {
+    config_path()
+        .map(|p| p.with_extension("marks"))
+        .unwrap_or_else(|| std::path::PathBuf::from("deskmates-rs.marks"))
+}
+
 fn cfg_mtime() -> Option<std::time::SystemTime> {
     config_path().and_then(|p| std::fs::metadata(p).ok().and_then(|m| m.modified().ok()))
 }
 
-/// Fork a WM-managed child window (Ask / Settings): the pet window is
-/// override-redirect and never gets keyboard focus; the child does.
-fn fork_child(arg: &str) {
+/// Fork a WM-managed child window (Ask / Settings / scene browser): the
+/// pet window is override-redirect and never gets keyboard focus; the
+/// child does. Returns false when the child could not be spawned.
+fn fork_child(args: &[&str]) -> bool {
     if let Ok(exe) = std::env::current_exe() {
-        let _ = std::process::Command::new(exe).arg(arg).spawn();
+        return std::process::Command::new(exe).args(args).spawn().is_ok();
     }
+    false
 }
 
 fn save_state(window: Option<&Window>, scale: f64, character: &str) {
@@ -410,9 +434,9 @@ fn assets_root() -> std::path::PathBuf {
 }
 
 /// All playable characters shipped under assets/characters/.
-const CHARACTERS: &[&str] = &["tahni", "fatb", "maeka", "kahli", "teecee", "oska"];
+pub(crate) const CHARACTERS: &[&str] = &["tahni", "fatb", "maeka", "kahli", "teecee", "oska"];
 
-fn display_name(character: &str) -> String {
+pub(crate) fn display_name(character: &str) -> String {
     match character {
         "fatb" => "FatB".to_string(),
         "teecee" => "TeeCee".to_string(),
@@ -578,6 +602,8 @@ struct App {
     /// Speech bubble: text shown until the given instant.
     bubble: Option<(String, Instant)>,
     ask_mtime: Option<std::time::SystemTime>,
+    /// Play-request handoff mtime from the forked scene browser.
+    play_mtime: Option<std::time::SystemTime>,
     cfg_mtime: Option<std::time::SystemTime>,
     /// Config toggle: pet may roam (walk/fence scenes move the window).
     walk_enabled: bool,
@@ -1116,7 +1142,7 @@ impl App {
                             "Touch" if self.review.is_none() => self.pet.touch(),
                             "Ask…" => {
                                 if self.agent.enabled() {
-                                    fork_child("--ask-ui");
+                                    fork_child(&["--ask-ui"]);
                                 } else {
                                     self.speak("I can chat, but no AI endpoint is set. Right-click, Settings… to add one!");
                                 }
@@ -1130,7 +1156,7 @@ impl App {
                                     .unwrap_or("tahni");
                                 self.switch_character(next);
                             }
-                            "Settings…" => fork_child("--settings-ui"),
+                            "Settings…" => { fork_child(&["--settings-ui"]); }
                             "Hide" => {
                                 if let Some(w) = &self.window {
                                     w.set_visible(false);
@@ -1323,6 +1349,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if argv.iter().any(|a| a == "--settings-ui") {
         return ask_ui::run(false).map(|_| ());
     }
+    if argv.iter().any(|a| a == "--review-ui") {
+        let character = argv
+            .iter()
+            .position(|a| a == "--character")
+            .and_then(|i| argv.get(i + 1))
+            .cloned()
+            .unwrap_or_else(|| load_config().character);
+        return review_ui::run(&character);
+    }
     let args: Vec<String> = argv;
     let matte = args.iter().any(|a| a == "--matte");
     let cfg = load_config();
@@ -1391,9 +1426,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pet.scene_loop = Some(s.clone());
         }
     }
-    // --review: step through every scene by name (scene-list review aid).
-    // Right/Space = next, Left = back, Esc = quit; name in stdout + title +
-    // bubble. Shows gated scenes too — that is the point of the review.
+    // --review: curate the scene set in the forked scene-browser window
+    // (scrollable tree of scenes + their entries, click to play, per-row
+    // gate marks, Export). The old keyboard stepping (Right/Space next,
+    // Left back, Esc quit; name in stdout + title + bubble) stays wired
+    // unchanged as the fallback whenever the browser cannot start. Shows
+    // gated scenes too — that is the point of the review.
     let mut review: Option<(Vec<String>, usize)> = None;
     if args.iter().any(|a| a == "--review") {
         let mut names: Vec<String> = sc.scenes.keys().cloned().collect();
@@ -1406,6 +1444,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             pet.scene_loop = Some(names[0].clone());
             println!("[review 1/{}] {}", names.len(), names[0]);
             review = Some((names, 0));
+            if !fork_child(&["--review-ui", "--character", &character]) {
+                eprintln!(
+                    "--review: scene browser failed to start; keyboard stepping only (→/Space next, ← back)"
+                );
+            }
         }
     }
     let mut agent_cfg = agent::AgentCfg {
@@ -1448,6 +1491,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         agent_rx,
         bubble: None,
         ask_mtime: ask_mtime(),
+        play_mtime: play_mtime(),
         cfg_mtime: cfg_mtime(),
         walk_enabled: cfg.walk,
         adult: cfg.adult,
@@ -1533,13 +1577,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ref id if id == "touch" && app.review.is_none() => app.pet.touch(),
                 ref id if id == "ask" => {
                     if app.agent.enabled() {
-                        fork_child("--ask-ui");
+                        fork_child(&["--ask-ui"]);
                     } else {
                         app.speak("I can chat, but no AI endpoint is set. Open Settings from the tray to add one!");
                     }
                 }
                 ref id if id == "next" => app.pet.next_scene(),
-                ref id if id == "settings" => fork_child("--settings-ui"),
+                ref id if id == "settings" => { fork_child(&["--settings-ui"]); }
                 ref id if id == "about" => {
                     app.about_until = Some(Instant::now() + Duration::from_secs(8));
                     if let Some(w) = &app.window {
@@ -1996,6 +2040,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if !q.is_empty() && app.agent.enabled() {
                             app.speak("Hmm, let me think…");
                             agent::send(app.agent.clone(), q, app.agent_tx.clone());
+                        }
+                        changed = true;
+                    }
+                }
+                // Play request handed over by the forked scene browser?
+                if let Some(mt) = play_mtime() {
+                    if app.play_mtime != Some(mt) {
+                        app.play_mtime = Some(mt);
+                        let req = std::fs::read_to_string(play_path()).unwrap_or_default();
+                        let _ = std::fs::write(play_path(), "");
+                        let req = req.trim().to_string();
+                        if let Some(name) = req.strip_prefix("switch:") {
+                            app.switch_character(name.trim());
+                        } else if let Some(scene) = req.lines().next().map(|l| l.trim().to_string()) {
+                            if !scene.is_empty() {
+                                let entry = req.lines().nth(1).unwrap_or("").trim().to_string();
+                                let ok = if entry.is_empty() {
+                                    app.pet.play_named(&scene)
+                                } else {
+                                    app.pet.play_pair(&scene, &entry)
+                                };
+                                if ok {
+                                    // Pin the loop: nothing hijacks the scene under review.
+                                    app.pet.scene_loop = Some(scene.clone());
+                                    app.pet.scene_loop_entry =
+                                        (!entry.is_empty()).then_some(entry.clone());
+                                    let shown = if entry.is_empty() {
+                                        scene
+                                    } else {
+                                        format!("{scene}/{entry}")
+                                    };
+                                    println!("[review] {shown}");
+                                    app.bubble =
+                                        Some((shown.clone(), Instant::now() + Duration::from_secs(3600)));
+                                    if let Some(w) = &app.window {
+                                        let _ = w.set_title(&shown);
+                                    }
+                                } else {
+                                    eprintln!("[review] no such scene: {scene}");
+                                }
+                            }
                         }
                         changed = true;
                     }

@@ -88,6 +88,9 @@ pub struct Pet {
     gap_phase: u8,
     /// Debug (`--scene NAME`): loop one scene forever, no random pool.
     pub scene_loop: Option<String>,
+    /// With `scene_loop`: loop that exact entry (sub-scene) instead of
+    /// the scene's first entry point (set by the scene browser).
+    pub scene_loop_entry: Option<String>,
     /// Bubble text for a fired ambient line (host consumes via take_talk).
     pending_talk: Option<String>,
 }
@@ -144,6 +147,7 @@ impl Pet {
             interstitial: Vec::new(),
             gap_phase: 0,
             scene_loop: None,
+            scene_loop_entry: None,
             pending_talk: None,
         };
         pet.start_random();
@@ -362,6 +366,28 @@ impl Pet {
         false
     }
 
+    /// Play an exact (scene, entry) pair — the scene browser's row click.
+    /// Bypasses the shuffle bag and the gated pool (review shows gated
+    /// scenes); an empty `entry` plays the scene's first entry point.
+    pub fn play_pair(&mut self, scene: &str, entry: &str) -> bool {
+        let Some(sc) = self.scenes.scenes.get(scene) else {
+            return false;
+        };
+        let found = if entry.is_empty() {
+            sc.entries.first()
+        } else {
+            sc.entries.iter().find(|e| *e == entry)
+        };
+        match found {
+            Some(e) => {
+                let e = e.clone();
+                self.play(scene, &e);
+                true
+            }
+            None => false,
+        }
+    }
+
     pub fn tick(&mut self, now: Instant) -> bool {
         let mut changed = false;
         // Idle gap.
@@ -374,7 +400,11 @@ impl Pet {
                     // `dialog_*` defs, so the next draw may be a voice
                     // line — no separate speech timer.
                     if let Some(s) = self.scene_loop.clone() {
-                        if !self.play_named(&s) {
+                        let ok = match self.scene_loop_entry.clone() {
+                            Some(e) => self.play_pair(&s, &e),
+                            None => self.play_named(&s),
+                        };
+                        if !ok {
                             self.start_random();
                         }
                     } else if self.gap_phase == 0 && !self.interstitial.is_empty() {
