@@ -71,6 +71,8 @@ the authentic period set:
 | kahli | 52 | 52/52 | 0 | 0 (+1 unplayable, below) |
 | maeka | 15 | 15/15 | 0 | 0 (+10 unplayable, below) |
 | oska | 84 | 84/84 | 0 | 0 |
+| dancers (`dancing-girls-rs`) | 54 | 54/54 | 0 | 0 |
+| sns (`sugar-n-spice-rs`) | 82 | 82/82 | 0 | 0 |
 
 Skipped (dedup / not playable):
 
@@ -101,10 +103,11 @@ Skipped (dedup / not playable):
 
 ## Not done (remaining candidates)
 
-- Sibling repos: `dancing-girls-rs` (BUNDLE `Dancers`, 49 FAZ) and
-  `sugar-n-spice-rs` (BUNDLE `SnS`, 55 FAZ) have not been dedup-surveyed
-  or wired; `deskmates3d-rs` (Tahni3D/Johlee) is out of scope by
-  contract.
+- Sibling repos `dancing-girls-rs` (BUNDLE `Dancers`) and
+  `sugar-n-spice-rs` (BUNDLE `SnS`) were dedup-surveyed: every scene in
+  those bundle dirs is byte-identical to what those repos already ship,
+  so there is nothing to wire (no classic set exists for them).
+  `deskmates3d-rs` (Tahni3D/Johlee) is out of scope by contract.
 - `extracted/Deskmate/Tahni 3.2 Full Unlock/Tahni Data` is md5-identical
   to the shipped set except `arnie.FAZ`/`scuba.FAZ`, which are the same
   v1.04 cuts as T104 (already covered above: placeholder / superseded by

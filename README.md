@@ -91,6 +91,9 @@ analysis/
                    kept as the reference the Rust port and tests/faz_parity.rs
                    are validated against)
   pack_assets.py   packs original FAZ scenes -> assets/characters/<name>/scenes/*.bin.gz
+  pack_classic.py  packs the early-set classic scenes -> scenes/*.bin.gz
+  classic_survey.py md5 dedup of early sets vs shipped sets
+  CLASSIC_MODE.md  classic-mode provenance, period label table, dedup stats
 assets/characters/<name>/
   scenes/<scene>.bin.gz   original FAZ container, gzip-compressed
                           (200x200 classic; 8bpp scenes up to 316x200 etc.)
@@ -111,8 +114,11 @@ python3 analysis/pack_assets.py tahni      # or just one
 ```
 
 Right-click: Touch her / Ask Tahni… / Next scene / Next character /
-Settings… / Hide / About / Quit. Left-drag moves her. She walks along the
-bottom edge of the screen between scenes. The tray icon's **Character**
+Settings… / Hide / About / Quit — plus **Classic** where a character has an
+early set (Tahni: the v1.04 demo from the Czech cover CD + dropped v1.04
+scenes, original period labels; see analysis/CLASSIC_MODE.md).
+Left-drag moves her.
+She walks along the bottom edge of the screen between scenes. The tray icon's **Character**
 submenu (or "Next character") hot-swaps between all 11 shipped characters:
 Tahni, FatB, Maeka, Kahli, Tavia, Sirens, Fantasy, DM05, SnS, Arianna,
 Dancers — the choice persists in the config. `--character <name>` selects
