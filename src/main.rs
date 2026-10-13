@@ -712,7 +712,10 @@ fn review_step(app: &mut App, dir: i32) {
 
 impl App {
     fn win_logical(&self) -> (u32, u32) {
-        ((self.fw as f64 * self.scale) as u32, (self.fh as f64 * self.scale) as u32)
+        // Zoom tracks the CURRENT scene canvas (cur_dims, kept in sync by
+        // sync_scene_window), not the modal frame size — scenes with
+        // off-modal canvases otherwise clip or skew when zoomed.
+        ((self.cur_dims.0 as f64 * self.scale) as u32, (self.cur_dims.1 as f64 * self.scale) as u32)
     }
 
     /// Faithful to the original: the window IS the current scene's
