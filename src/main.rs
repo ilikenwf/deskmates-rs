@@ -164,6 +164,8 @@ mod xshape {
         class: String,
         window: Option<u32>,
         since_resolve: u32,
+        skip_done: bool,
+        startup_ticks: u32,
     }
 
     impl Shaper {
@@ -176,6 +178,8 @@ mod xshape {
                     .unwrap_or_default(),
                 window: None,
                 since_resolve: 0,
+                skip_done: false,
+                startup_ticks: 0,
             }
         }
 
@@ -183,6 +187,7 @@ mod xshape {
         fn resolve(&mut self) {
             self.window = None;
             self.since_resolve = 0;
+            self.skip_done = false;
             let Some((conn, screen)) = &self.conn else { return };
             let root = conn.setup().roots[*screen].root;
             let tree = conn
@@ -260,6 +265,24 @@ mod xshape {
                 Ok(())
             })();
             let _ = r;
+            self.skip_done = true;
+        }
+        /// Apply the skip-taskbar atom as soon as the window is mapped,
+        /// without waiting for the first rendered frame: slow scene-pack
+        /// parses (dm05: ~2 min debug FAZ) would otherwise leave the window
+        /// listed in the WM window list — title and all — for the whole parse.
+        /// Retries at ~8x the event-loop cadence until resolved.
+        pub fn ensure_skip_taskbar(&mut self) {
+            if self.skip_done {
+                return;
+            }
+            self.startup_ticks += 1;
+            if self.window.is_none() && self.startup_ticks % 8 == 0 {
+                self.resolve();
+            }
+            if self.window.is_some() {
+                self.set_skip_taskbar();
+            }
         }
         /// Clip the window (bounding + input) to the opaque pixels of the
         /// straight-alpha RGBA `canvas` (stride 4, `w`x`h`).
@@ -1501,6 +1524,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Event::UserEvent(_) => {}
             Event::AboutToWait => {
                 let now = Instant::now();
+                #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                app.shaper.ensure_skip_taskbar();
                 // While the menu is open the pet must not walk or change
                 // scenes: the menu is painted inside the pet window, and a
                 // moving/resizing window makes menu clicks miss.
