@@ -80,7 +80,7 @@ pub struct Scenes {
     /// Parsed FAZ containers keyed by scene name; frames decode on demand.
     faz: HashMap<String, faz::Faz>,
     /// scene -> (frame id -> decoded RGBA), kept for the process lifetime.
-    cache: Mutex<HashMap<(String, u32), Option<RgbaImage>>>,
+    cache: Mutex<HashMap<(String, u32), Option<std::sync::Arc<RgbaImage>>>>,
     /// Names loaded from `behaviors/` (common.FAS etc.): def sources, never
     /// part of the random idle pool or the window-size vote.
     pub behaviors: std::collections::HashSet<String>,
@@ -177,6 +177,33 @@ impl Scenes {
                 .and_then(|s| s.to_str())
                 .map(|s| s.trim_end_matches(".bin.gz").to_string())
                 .unwrap_or_else(|| f.name.clone());
+            // Original-author wiring bug (RC3): `all` points at
+            // maeka_S021_Big_Dance_sequence_aa/_ab, which resolve via
+            // the common.FAS fallback to sword-TRAINING frames. The
+            // actual choreography (frames 4000-4154, visually verified)
+            // lives in the orphaned trailing-underscore defs nothing
+            // called. Wire the entry to the real dance.
+            if name == "maeka_dancer" {
+                const DANCE: &str = "{maeka_S021_Big_Dance_sequence_aa_|maeka_S021_Big_Dance_sequence_ab_},pause";
+                if defmap.contains_key("maeka_S021_Big_Dance_sequence_aa_") {
+                    let v = faz::parse_reflist(DANCE.as_bytes())
+                        .into_iter()
+                        .map(|t| match t {
+                            faz::Tok::Frame { id, x, y, rep } => {
+                                Def { id, x, y, rep, name: String::new(), sound: String::new() }
+                            }
+                            faz::Tok::Name { name, rep } => {
+                                Def { id: 0, x: 0, y: 0, rep, name, sound: String::new() }
+                            }
+                            faz::Tok::Sound { name } => {
+                                Def { id: 0, x: 0, y: 0, rep: 1, name: String::new(), sound: name }
+                            }
+                        })
+                        .collect();
+                    rawmap.insert("all".to_string(), DANCE.as_bytes().to_vec());
+                    defmap.insert("all".to_string(), v);
+                }
+            }
             scenes.insert(name.clone(), Scene { name: name.clone(), entries, defs: defmap, raw: rawmap, w, h });
             fazs.insert(name, f);
         }
@@ -229,7 +256,7 @@ impl Scenes {
         Ok(Scenes { dir: dir.to_path_buf(), scenes, faz: fazs, cache: Mutex::new(HashMap::new()), behaviors, touch: touch_map })
     }
 
-    pub fn frame(&self, scene: &str, id: u32) -> Option<RgbaImage> {
+    pub fn frame(&self, scene: &str, id: u32) -> Option<std::sync::Arc<RgbaImage>> {
         let key = (scene.to_string(), id);
         if let Some(hit) = self.cache.lock().get(&key) {
             return hit.clone();
@@ -253,6 +280,7 @@ impl Scenes {
                 }
             }
         }
+        let img = img.map(std::sync::Arc::new);
         self.cache.lock().insert(key, img.clone());
         img
     }
@@ -266,7 +294,7 @@ impl Scenes {
             if self.cache.lock().contains_key(&key) {
                 continue;
             }
-            let img = faz::decode_frame(f, *id);
+            let img = faz::decode_frame(f, *id).map(std::sync::Arc::new);
             self.cache.lock().insert(key, img);
         }
     }
