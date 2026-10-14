@@ -1472,6 +1472,15 @@ fn draw_text(c: &mut [u8], cw: u32, ch: u32, font: &FontArc, text: &str, x: f32,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Software GL (llvmpipe/lavapipe — what any GPU-less machine gets) wakes
+    // a raster thread pool per present: 24 threads for a small pet window,
+    // ~2x the total CPU of a single raster thread for the same frame. Mesa
+    // reads this lazily when the driver initialises, so setting it before
+    // the first window wins; hardware drivers ignore the variable. Forked
+    // children inherit it.
+    if std::env::var_os("LP_NUM_THREADS").is_none() {
+        std::env::set_var("LP_NUM_THREADS", "1");
+    }
     // Child modes: forked WM-managed windows (real keyboard focus).
     let argv: Vec<String> = std::env::args().collect();
     if argv.iter().any(|a| a == "--ask-ui") {
