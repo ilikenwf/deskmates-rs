@@ -748,6 +748,13 @@ pub fn run(character: &str) -> Result<(), Box<dyn std::error::Error>> {
                 if sz.width > 0 && sz.height > 0 && (sz.width, sz.height) != ui.size {
                     ui.size = (sz.width, sz.height);
                     if let Some(w) = ui.window.clone() {
+                        // Drop the OLD renderer BEFORE building the new
+                        // one: pixels::SurfaceTexture registers a
+                        // wp_surface_tearing_control_v1 per instance, and
+                        // Wayland rejects a second one on the same
+                        // surface -> Surface::configure validation error
+                        // (crash on KDE at map time, scale 1.8).
+                        ui.pixels = None;
                         if let Some(p) = Ui::build_pixels(sz.width, sz.height, &w) {
                             ui.pixels = Some(p);
                         }
@@ -769,6 +776,9 @@ pub fn run(character: &str) -> Result<(), Box<dyn std::error::Error>> {
                     let sz = w.inner_size();
                     if sz.width > 0 && sz.height > 0 {
                         ui.size = (sz.width, sz.height);
+                        // Old renderer must die first (see Resized:
+                        // tearing-control collision on Wayland).
+                        ui.pixels = None;
                         if let Some(p) = Ui::build_pixels(sz.width, sz.height, &w) {
                             ui.pixels = Some(p);
                         }
