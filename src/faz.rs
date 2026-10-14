@@ -276,7 +276,40 @@ pub fn parse_faz(d: &[u8]) -> Option<Faz> {
     let mut flags: Option<Vec<u8>> = None;
     let mut count_table = false;
     let mut data_start: Option<usize> = None;
-    {
+    // Old format FIRST: [u16 count @ s-2][u16 ids incl. leading 0 @ s]
+    // [0xffff][n flag bytes][n blocks]. The count-form equation below
+    // false-positives on these files — the u32 at s-2 (count byte + the
+    // three NULs of the leading id 0) satisfies len-(c+4)==v*(bs+3) —
+    // and then drops the leading 0 id, shifting every frame one pose
+    // and mapping the last block to bogus id 65535. Verify the old
+    // format's own invariants (count matches id run, exact trailing
+    // length) and trust them over the count scan.
+    if s >= 2 {
+        let mut old_ids: Vec<u16> = Vec::new();
+        let mut p = s;
+        let mut term: Option<usize> = None;
+        while p + 2 <= d.len() {
+            match le16(d, p) {
+                Some(0xffff) => {
+                    term = Some(p);
+                    break;
+                }
+                Some(v) => old_ids.push(v),
+                None => break,
+            }
+            p += 2;
+        }
+        if let Some(t) = term {
+            let n = old_ids.len();
+            let after = t + 2;
+            if le16(d, s - 2) == Some(n as u16) && d.len() == after + n + n * bs {
+                ids = old_ids;
+                flags = Some(d[after..after + n].to_vec());
+                data_start = Some(after + n);
+            }
+        }
+    }
+    if data_start.is_none() {
         let hi = (s + 16).min(d.len().saturating_sub(4));
         for c in (s.saturating_sub(8)).max(0)..hi {
             if let Some((ids2, flags2, ds)) = try_count_table(d, c, bs) {

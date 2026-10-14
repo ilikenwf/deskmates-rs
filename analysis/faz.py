@@ -68,33 +68,58 @@ def parse_faz(d):
             break
         pairs.append(t.decode('latin1'))
         s = e + 1
-    # frame table: try the new count-prefixed form first (exact size check),
-    # then fall back to the old 0xffff-terminated scan.
+    # frame table: try the OLD 0xffff-terminated form FIRST. Its own
+    # invariants (u16 count at s-2 matching the id run, exact trailing
+    # length after the flag bytes) are strict; the count-form size
+    # equation false-positives on old files (u32 at s-2 = count byte +
+    # three NULs of the leading id 0 satisfies len-(c+4)==v*(bs+3)),
+    # dropping the leading 0 id and shifting every frame one pose.
     ids = []
     data = None
     table = 'old'
     flags = None
     bs = block_size(dims[0], dims[1], bpp_ or 4) if dims else 20000
-    if s is not None:
-        for c in range(max(s - 8, 0), min(s + 16, len(d) - 4)):
-            v = struct.unpack_from('<I', d, c)[0]
-            if v > 4000:
-                continue
-            if len(d) - (c + 4) == v * (bs + 3):
-                table = 'count'
-                ids = list(struct.unpack_from('<%dH' % v, d, c + 4)) if v else []
-                flags = list(d[c + 4 + 2 * v:c + 4 + 3 * v])
-                data = d[c + 4 + 3 * v:]
-                break
-    if data is None:
-        i = s if s is not None else len(d)
+    if s is not None and s >= 2:
+        i = s
         while i + 2 <= len(d):
             v = struct.unpack_from('<H', d, i)[0]
             if v == 0xffff:
                 break
             ids.append(v)
             i += 2
-        data = d[i + len(ids):]
+        else:
+            i = None
+        if i is not None:
+            n = len(ids)
+            after = i + 2
+            if struct.unpack_from('<H', d, s - 2)[0] == n and \
+               len(d) == after + n + n * bs:
+                table = 'old'
+                flags = list(d[after:after + n])
+                data = d[after + n:]
+            else:
+                ids = []
+    if data is None:
+        if s is not None:
+            for c in range(max(s - 8, 0), min(s + 16, len(d) - 4)):
+                v = struct.unpack_from('<I', d, c)[0]
+                if v > 4000:
+                    continue
+                if len(d) - (c + 4) == v * (bs + 3):
+                    table = 'count'
+                    ids = list(struct.unpack_from('<%dH' % v, d, c + 4)) if v else []
+                    flags = list(d[c + 4 + 2 * v:c + 4 + 3 * v])
+                    data = d[c + 4 + 3 * v:]
+                    break
+        if data is None:
+            i = s if s is not None else len(d)
+            while i + 2 <= len(d):
+                v = struct.unpack_from('<H', d, i)[0]
+                if v == 0xffff:
+                    break
+                ids.append(v)
+                i += 2
+            data = d[i + len(ids):]
     nblocks = len(data) // bs
     frames = {}
     frame_flags = {}
