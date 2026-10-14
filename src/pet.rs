@@ -93,7 +93,43 @@ pub struct Fence {
     pub dy: i8,
     /// true: window slides from the edge to its rest position.
     pub entering: bool,
+    /// `fence_fs` / `fence_home`: the original grows the window rect to
+    /// the full work area and moves the sprite inside it. Our window
+    /// tracks the sprite, so the host settles it at the rest anchor
+    /// instead of sliding it anywhere (PLAYER_RE §2).
+    pub fullscreen: bool,
 }
+
+/// Decode a `fence_*` def name into a window transition (PLAYER_RE §2).
+/// Edge letters appear in either order (`fence_lb` and `fence_tl` both
+/// exist); `fs` (front stage) / `home` are full-work-area rects.
+pub fn fence_parse(name: &str) -> Fence {
+    let edge = name
+        .trim_start_matches("fence_")
+        .trim_end_matches("_in")
+        .trim_end_matches("_out");
+    let fullscreen = matches!(edge, "fs" | "home" | "full_screen");
+    let dx = if fullscreen {
+        0
+    } else if edge.contains('l') {
+        1
+    } else if edge.contains('r') {
+        -1
+    } else {
+        0
+    };
+    let dy = if fullscreen {
+        0
+    } else if edge.contains('t') {
+        1
+    } else if edge.contains('b') || edge.contains('f') {
+        -1
+    } else {
+        0
+    };
+    Fence { dx, dy, entering: name.ends_with("_in"), fullscreen }
+}
+
 
 /// Current sprite to draw: scene + frame id + pixel offset. id 0 = blank.
 #[derive(Clone, Debug, PartialEq)]
@@ -412,6 +448,23 @@ impl Pet {
         }
         self.touch();
     }
+    /// Play a touch-reaction definition by exact name (review-browser
+    /// `touch:<def>` handoff). Returns false when the character has no
+    /// such touch def.
+    pub fn play_touch_def(&mut self, def: &str) -> bool {
+        if self
+            .scenes
+            .scenes
+            .get("touch")
+            .is_some_and(|s| s.raw.contains_key(def))
+        {
+            self.play("touch", def);
+            true
+        } else {
+            false
+        }
+    }
+
 
     /// Click on the sprite: interrupt with a touch reaction.
     pub fn touch(&mut self) {
@@ -687,34 +740,19 @@ impl Pet {
                         _ => {}
                     }
                     if name.starts_with("fence_") {
-                        // Screen-edge transition: the window slides
-                        // between a screen edge and its rest position.
-                        // Suffix _in / _out gives the travel direction.
-                        // Edge letters appear in either order (fence_lb
-                        // and fence_tl both exist) and `fs` (front stage,
-                        // bottom-center) matches neither position slot, so
-                        // scan the name instead of reading fixed bytes.
-                        let edge = name
-                            .trim_start_matches("fence_")
-                            .trim_end_matches("_in")
-                            .trim_end_matches("_out");
-                        let dx = if edge.contains('l') {
-                            1
-                        } else if edge.contains('r') {
-                            -1
-                        } else {
-                            0
-                        };
-                        let dy = if edge.contains('t') {
-                            1
-                        } else if edge.contains('b') || edge.contains('f') {
-                            -1
-                        } else {
-                            0
-                        };
-                        let entering = name.ends_with("_in");
-                        self.fence = Some(Fence { dx, dy, entering });
-                        self.walk_dir = dx;
+                        // Fence defs are window-rect anchors, not
+                        // off-screen parks (PLAYER_RE §2): `fence_lb_out`
+                        // = ©[-200,200]0l0b,[0,0]0l0b© slides the window
+                        // by per-frame deltas until its corner rests AT
+                        // the bottom-left of the work area — fully
+                        // visible. `_in` slides from that edge anchor
+                        // inward (toward rest). `fs`/`home` are full
+                        // work-area rects: the original grows the window
+                        // and moves the sprite inside it; our window
+                        // tracks the sprite, so settle at rest instead.
+                        let f = fence_parse(&name);
+                        self.fence = Some(f);
+                        self.walk_dir = if f.fullscreen { 0 } else { f.dx };
                         self.frame_dur = Duration::from_millis(300);
                         return true;
                     }
@@ -967,5 +1005,28 @@ mod dig_tests {
         let min = counts.iter().min().unwrap();
         let max = counts.iter().max().unwrap();
         assert!(*max <= *min * 4, "rotation lopsided: min {min} max {max}");
+    }
+}
+
+#[cfg(test)]
+mod fence_tests {
+    use super::*;
+
+    /// PLAYER_RE §2 grammar: corner fences travel toward/away from the
+    /// named edge (dx/dy point INWARD for `_in`), `_in` slides to rest,
+    /// `fs`/`home` are full-rect settles with no travel.
+    #[test]
+    fn fence_grammar() {
+        assert_eq!(fence_parse("fence_lb_in"), Fence { dx: 1, dy: -1, entering: true, fullscreen: false });
+        assert_eq!(fence_parse("fence_lb_out"), Fence { dx: 1, dy: -1, entering: false, fullscreen: false });
+        assert_eq!(fence_parse("fence_rb_in"), Fence { dx: -1, dy: -1, entering: true, fullscreen: false });
+        assert_eq!(fence_parse("fence_tl_out"), Fence { dx: 1, dy: 1, entering: false, fullscreen: false });
+        // `c` horizontal center: no horizontal travel; `m` middle: none vertical.
+        assert_eq!(fence_parse("fence_cm"), Fence { dx: 0, dy: 0, entering: false, fullscreen: false });
+        assert_eq!(fence_parse("fence_cb_in"), Fence { dx: 0, dy: -1, entering: true, fullscreen: false });
+        assert_eq!(fence_parse("fence_fs"), Fence { dx: 0, dy: 0, entering: false, fullscreen: true });
+        assert_eq!(fence_parse("fence_fs_out"), Fence { dx: 0, dy: 0, entering: false, fullscreen: true });
+        assert_eq!(fence_parse("fence_home"), Fence { dx: 0, dy: 0, entering: false, fullscreen: true });
+        assert_eq!(fence_parse("fence_full_screen"), Fence { dx: 0, dy: 0, entering: false, fullscreen: true });
     }
 }

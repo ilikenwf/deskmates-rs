@@ -900,18 +900,32 @@ impl App {
                     r
                 }
             };
-            // Edge anchor: window fully off-screen at the fence edge,
-            // measured against the work area (`fence_home` = inset 1).
+            // Edge anchor: the window's edge rests AT the work-area
+            // edge, fully visible (PLAYER_RE §2: fence bodies anchor the
+            // window rect at the edge, e.g. `0l0b` = bottom-left corner
+            // of the work area — the sprite peeks in from that side, it
+            // does not park off-screen).
+            if f.fullscreen {
+                // fs/home: full-work-area rect; our window tracks the
+                // sprite, so settle at the rest anchor immediately.
+                let _ = w.set_outer_position(Position::Physical(PhysicalPosition::new(
+                    rest.0, rest.1,
+                )));
+                self.walk_x = rest.0 as f64;
+                self.pet.fence_done();
+                return;
+            }
             let ex = match f.dx {
-                1 => wa.0 - ww,
-                -1 => wa.0 + wa.2,
+                1 => wa.0,
+                -1 => wa.0 + wa.2 - ww,
                 _ => rest.0,
             };
             let ey = match f.dy {
-                1 => wa.1 - wh,
-                -1 => wa.1 + wa.3,
+                1 => wa.1,
+                -1 => wa.1 + wa.3 - wh,
                 _ => rest.1,
             };
+            // Entering slides edge -> rest; exiting slides rest -> edge.
             let (tx, ty) = if f.entering { (rest.0, rest.1) } else { (ex, ey) };
             let step = speed * dt;
             let mut nx = p.x as f64;
@@ -1944,7 +1958,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
                     if let Some(pr) = app.press.take() {
-                        if pr.dragging {
+                        // A window that moved under the cursor during the
+                        // press is a drag even when `dragging` never
+                        // latched: WM pointer grabs deliver synthetic
+                        // press/release pairs, and a pet walk/fence slide
+                        // moves the window without moving the pointer —
+                        // neither motion source sees it. Position is the
+                        // ground truth.
+                        let moved = app
+                            .window
+                            .as_ref()
+                            .and_then(|w| w.outer_position().ok())
+                            .map_or(false, |p| {
+                                (p.x - pr.win.0).abs() + (p.y - pr.win.1).abs() > 3
+                            });
+                        if pr.dragging || moved {
                             #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
                             if let Some(w) = &app.window {
                                 let _ = w.set_cursor_grab(CursorGrabMode::None);
@@ -1962,7 +1990,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     // Native sprite coords for the hotspot map.
                                     let sf = app.window.as_ref().map(|w| w.scale_factor()).unwrap_or(1.0);
                                     let d = (app.scale * sf).max(0.01);
-                                    if app.review.is_none() { app.pet.touch_at(mx / d, my / d); }
+                                    if app.review.is_none() {
+                                        app.pet.touch_at(mx / d, my / d);
+                                    }
                                 }
                                 if let Some(w) = &app.window {
                                     request_paint(w);
@@ -2196,6 +2226,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let req = req.trim().to_string();
                         if let Some(name) = req.strip_prefix("switch:") {
                             app.switch_character(name.trim());
+                        } else if let Some(def) = req.strip_prefix("touch:") {
+                            // Review browser: play one touch reaction by
+                            // exact def name (bypasses hotspot gating).
+                            let def = def.trim().to_string();
+                            if app.pet.play_touch_def(&def) {
+                                println!("[review] touch:{def}");
+                                app.bubble =
+                                    Some((def.clone(), Instant::now() + Duration::from_secs(3600)));
+                                if let Some(w) = &app.window {
+                                    let _ = w.set_title(&def);
+                                }
+                            } else {
+                                eprintln!("[review] no such touch def: {def}");
+                            }
                         } else if let Some(scene) = req.lines().next().map(|l| l.trim().to_string()) {
                             if !scene.is_empty() {
                                 let entry = req.lines().nth(1).unwrap_or("").trim().to_string();
