@@ -190,6 +190,15 @@ impl Ui {
                 }
             }
         }
+        // A treeview always carries a current row: pre-select the first
+        // one whenever nothing is selected (startup, character switch).
+        // Keeps "Down x3 + Enter" deterministic — it plays the 4th row
+        // from a fresh or freshly-switched tree.
+        if self.selected.is_none() {
+            if let Some(r) = self.rows.first() {
+                self.selected = Some((r.scene.clone(), r.entry.clone()));
+            }
+        }
     }
 
     fn set_title(&self) {
