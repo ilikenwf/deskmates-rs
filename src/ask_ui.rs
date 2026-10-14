@@ -21,6 +21,116 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes};
 
+// ---------------------------------------------------------------------------
+// System clipboard for the text fields. Three backends, tried in order,
+// each optional — the dialog must NEVER crash because the clipboard is
+// broken:
+//
+// 1. arboard — kept alive in a process-wide slot so we remain the X11
+//    CLIPBOARD owner after set_text (a dropped Clipboard stops serving
+//    selection requests). Built `default-features = false`, so its
+//    Linux backend is X11-only: on Wayland Clipboard::new() fails and
+//    we fall through. DESKMATES_CLIP_NO_ARBOARD=1 skips it (tests).
+// 2. wl-copy / wl-paste — the reliable Wayland route; wl-copy forks and
+//    owns the selection after we exit.
+// 3. xclip — X11 fallback; `xclip -i` likewise forks and keeps serving.
+//
+// Every copy also lands in an internal buffer, so Ctrl+V always works
+// inside the dialog even when all three system routes are missing.
+// ---------------------------------------------------------------------------
+
+/// Internal last-resort buffer (also the source for Ctrl+V when the
+/// system clipboard reads empty).
+static CLIP_INTERNAL: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// Live arboard handle (lazily — construction touches the X server,
+/// never at load time).
+static CLIP_ARBOARD: std::sync::LazyLock<std::sync::Mutex<Option<arboard::Clipboard>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+/// Spawn `cmd` with `text` on stdin; true if it ran successfully.
+fn clip_pipe_in(cmd: &str, args: &[&str], text: &str) -> bool {
+    let Ok(mut child) = std::process::Command::new(cmd)
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    if let Some(mut si) = child.stdin.take() {
+        let _ = std::io::Write::write_all(&mut si, text.as_bytes());
+    }
+    // wl-copy (default mode) and xclip -i both fork to keep serving the
+    // selection after their parent exits, so wait() returns promptly.
+    child.wait().ok().is_some_and(|s| s.success())
+}
+
+fn clip_pipe_out(cmd: &str, args: &[&str]) -> Option<String> {
+    std::process::Command::new(cmd)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+/// Copy `text` to the system clipboard. True when a *system* backend
+/// took it (the internal buffer is updated either way).
+fn clip_set(text: &str) -> bool {
+    if let Ok(mut g) = CLIP_INTERNAL.lock() {
+        *g = text.to_string();
+    }
+    if std::env::var_os("DESKMATES_CLIP_NO_ARBOARD").is_none() {
+        if let Ok(mut guard) = CLIP_ARBOARD.lock() {
+            if guard.is_none() {
+                *guard = arboard::Clipboard::new().ok();
+            }
+            if let Some(cb) = guard.as_mut() {
+                if cb.set_text(text.to_string()).is_ok() {
+                    return true;
+                }
+            }
+        }
+    }
+    if clip_pipe_in("wl-copy", &[], text) {
+        return true;
+    }
+    clip_pipe_in("xclip", &["-selection", "clipboard", "-i"], text)
+}
+
+/// Read the system clipboard: arboard -> wl-paste -> xclip -> internal.
+fn clip_get() -> String {
+    if std::env::var_os("DESKMATES_CLIP_NO_ARBOARD").is_none() {
+        if let Ok(mut guard) = CLIP_ARBOARD.lock() {
+            if guard.is_none() {
+                *guard = arboard::Clipboard::new().ok();
+            }
+            if let Some(cb) = guard.as_mut() {
+                if let Ok(t) = cb.get_text() {
+                    if !t.is_empty() {
+                        return t;
+                    }
+                }
+            }
+        }
+    }
+    if let Some(t) = clip_pipe_out("wl-paste", &["--no-newline"]) {
+        if !t.is_empty() {
+            return t;
+        }
+    }
+    if let Some(t) = clip_pipe_out("xclip", &["-selection", "clipboard", "-o"]) {
+        if !t.is_empty() {
+            return t;
+        }
+    }
+    CLIP_INTERNAL.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
 const W: u32 = 460;
 const H: u32 = 330;
 const FIELDS: [&str; 3] = ["API endpoint (blank = offline)", "API key", "Model"];
@@ -81,9 +191,6 @@ struct Ui {
     anchor: Option<usize>,
     /// Live modifier state (winit 0.30: delivered via ModifiersChanged).
     mods: winit::event::Modifiers,
-    /// Kept alive so we remain the X11 CLIPBOARD selection owner after
-    /// set_text (a dropped arboard Clipboard stops serving requests).
-    clip: Option<arboard::Clipboard>,
 }
 
 impl Ui {
@@ -414,7 +521,7 @@ impl Ui {
         self.walk_rect = (m as i32, cb3 as i32 - (3.0 * s) as i32, gw, t.box_px() + (7.0 * s) as i32);
 
         self.save_rect = retro::button(&mut canvas, w, h, &self.font, &t, m as i32, btn_y as i32, (90.0 * s) as i32, (25.0 * s) as i32, "Save", true, false, false);
-        let help = "Click a field to edit. Enter saves. Esc closes. Ctrl+A/C/V/X, shift to select.";
+        let help = "Click a field to edit. Enter saves. Esc closes. Ctrl+A/C/V/X + Shift+Insert paste; shift to select.";
         let msg = if self.status.is_empty() { help } else { &self.status };
         retro::statusbar(&mut canvas, w, h, &self.font, &t, 0, sb_y, w as i32, sb_h, msg);
         self.present(canvas);
@@ -451,7 +558,6 @@ pub fn run(ask: bool) -> Result<(), Box<dyn std::error::Error>> {
         caret: 0,
         anchor: None,
         mods: Default::default(),
-        clip: None,
         window: None,
         pixels: None,
         size: (W, if ask { 170 } else { H }),
@@ -533,32 +639,16 @@ pub fn run(ask: bool) -> Result<(), Box<dyn std::error::Error>> {
                         }
                         Some('c') => {
                             let t = ui.copy_text();
-                            if ui.clip.is_none() {
-                                ui.clip = arboard::Clipboard::new().ok();
-                            }
-                            if let Some(cb) = ui.clip.as_mut() {
-                                let _ = cb.set_text(t);
-                            }
+                            clip_set(&t);
                         }
                         Some('x') => {
                             let t = ui.copy_text();
-                            if ui.clip.is_none() {
-                                ui.clip = arboard::Clipboard::new().ok();
-                            }
-                            if let Some(cb) = ui.clip.as_mut() {
-                                let _ = cb.set_text(t);
-                            }
+                            clip_set(&t);
                             ui.delete_selection();
                         }
                         Some('v') => {
-                            if ui.clip.is_none() {
-                                ui.clip = arboard::Clipboard::new().ok();
-                            }
-                            if let Some(cb) = ui.clip.as_mut() {
-                                if let Ok(t) = cb.get_text() {
-                                    ui.paste(&t);
-                                }
-                            }
+                            let t = clip_get();
+                            ui.paste(&t);
                         }
                         _ => {}
                     }
@@ -599,6 +689,11 @@ pub fn run(ask: bool) -> Result<(), Box<dyn std::error::Error>> {
                             let t = ui.fields[ui.sel].chars().count();
                             ui.move_caret(t, shift);
                         }
+                        // Shift+Insert pastes (classic X convention).
+                        Key::Named(NamedKey::Insert) if shift => {
+                            let t = clip_get();
+                            ui.paste(&t);
+                        }
                         _ => {
                             if let Some(c) = text
                                 .and_then(|t| t.chars().next())
@@ -628,4 +723,42 @@ pub fn run(ask: bool) -> Result<(), Box<dyn std::error::Error>> {
         _ => {}
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod clip_tests {
+    use super::{clip_get, clip_set};
+
+    fn which(bin: &str) -> bool {
+        std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+            .any(|d| d.join(bin).is_file())
+    }
+
+    /// One sequential test: the scenarios mutate process-global env
+    /// (PATH, the arboard kill-switch), so they must not race.
+    #[test]
+    fn clipboard_backends() {
+        std::env::set_var("DESKMATES_CLIP_NO_ARBOARD", "1");
+
+        // Internal-only fallback: with no binaries on PATH nothing
+        // crashes and the buffer still round-trips (never-crash rule).
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", "/nonexistent");
+        assert!(!clip_set("internal-only"));
+        assert_eq!(clip_get(), "internal-only");
+        std::env::set_var("PATH", old_path);
+
+        // Real xclip fallback (needs an X display; skipped without).
+        if std::env::var_os("DISPLAY").is_some() && which("xclip") {
+            let probe = format!("deskmates-clip-{}", std::process::id());
+            assert!(clip_set(&probe), "xclip -i should succeed");
+            assert_eq!(clip_get(), probe);
+        } else {
+            eprintln!("skip xclip round-trip: no DISPLAY or no xclip");
+        }
+
+        std::env::remove_var("DESKMATES_CLIP_NO_ARBOARD");
+    }
 }
