@@ -1079,10 +1079,10 @@ impl App {
         {
             let buf = px.frame_mut();
             for (dst, src) in buf.chunks_exact_mut(4).zip(canvas.chunks_exact(4)) {
-                let a = src[3] as u16;
-                dst[0] = (src[0] as u16 * a / 255) as u8;
-                dst[1] = (src[1] as u16 * a / 255) as u8;
-                dst[2] = (src[2] as u16 * a / 255) as u8;
+                let a = src[3] as usize;
+                dst[0] = MUL255[a][src[0] as usize];
+                dst[1] = MUL255[a][src[1] as usize];
+                dst[2] = MUL255[a][src[2] as usize];
                 dst[3] = a as u8;
             }
         }
@@ -1202,60 +1202,106 @@ fn anchored_resize(w: &Window, lw: u32, lh: u32) {
     let _ = w.request_inner_size(LogicalSize::new(lw as f64, lh as f64));
 }
 
+/// `v * a / 255` rounded, as a 256x256 table (a-major). Source-over and
+/// premultiplication run per-pixel every frame; the table keeps both hot
+/// loops division-free.
+static MUL255: [[u8; 256]; 256] = {
+    let mut t = [[0u8; 256]; 256];
+    let mut a = 0;
+    while a < 256 {
+        let mut v = 0;
+        while v < 256 {
+            t[a][v] = ((v * a + 127) / 255) as u8;
+            v += 1;
+        }
+        a += 1;
+    }
+    t
+};
+
+/// Alpha-weighted bilinear sprite blit: pixel-center sampling is exact
+/// nearest at scale == 1 and smooth above it; premultiplied taps keep
+/// transparent pixels from bleeding their color, and edge taps clamp.
+/// Integer fixed-point (10-bit weights) with per-column taps hoisted out
+/// of the row loop; the inner loop is division-free.
 fn blit(canvas: &mut [u8], cw: u32, ch: u32, img: &RgbaImage, x: i32, y: i32, scale: f64) {
-    let (iw, ih) = img.dimensions();
-    let dw = (iw as f64 * scale) as i32;
-    let dh = (ih as f64 * scale) as i32;
+    let (iw, ih) = (img.width() as usize, img.height() as usize);
+    if iw == 0 || ih == 0 || cw == 0 || ch == 0 {
+        return;
+    }
+    let src = img.as_raw();
+    let dw = (iw as f64 * scale).max(0.0) as i32;
+    let dh = (ih as f64 * scale).max(0.0) as i32;
+    if dw == 0 || dh == 0 {
+        return;
+    }
+    // Per-column source taps: (byte offset of x0, byte offset of x1, wx).
+    let mut cols: Vec<(usize, usize, u32)> = Vec::with_capacity(dw as usize);
+    for dx in 0..dw {
+        let fx = (dx as f64 + 0.5) / scale - 0.5;
+        let x0 = fx.floor() as i32;
+        let wx = ((fx - x0 as f64) * 1024.0) as u32;
+        let i0 = x0.clamp(0, iw as i32 - 1) as usize * 4;
+        let i1 = (x0 + 1).clamp(0, iw as i32 - 1) as usize * 4;
+        cols.push((i0, i1, wx));
+    }
     for dy in 0..dh {
         let py = y + dy;
         if py < 0 || py >= ch as i32 {
             continue;
         }
-        // Pixel-center bilinear sampling: exact nearest at scale == 1,
-        // smooth upscale above it.
         let fy = (dy as f64 + 0.5) / scale - 0.5;
         let y0 = fy.floor() as i32;
-        let wy = fy - y0 as f64;
-        for dx in 0..dw {
-            let px = x + dx;
+        let wy = ((fy - y0 as f64) * 1024.0) as u32;
+        let wy1 = 1024 - wy;
+        let r0 = y0.clamp(0, ih as i32 - 1) as usize * iw * 4;
+        let r1 = (y0 + 1).clamp(0, ih as i32 - 1) as usize * iw * 4;
+        let row = py as usize * cw as usize * 4;
+        for (dx, &(c0, c1, wx)) in cols.iter().enumerate() {
+            let px = x + dx as i32;
             if px < 0 || px >= cw as i32 {
                 continue;
             }
-            let fx = (dx as f64 + 0.5) / scale - 0.5;
-            let x0 = fx.floor() as i32;
-            let wx = fx - x0 as f64;
-            // Alpha-weighted (premultiplied) taps: fully transparent
-            // pixels must not bleed their (often black) color into
-            // opaque neighbours - only alpha interpolates linearly.
-            let mut wa = 0.0f64;
-            let mut wr = 0.0f64;
-            let mut wg = 0.0f64;
-            let mut wb = 0.0f64;
-            for (oy, wyw) in [(y0, 1.0 - wy), (y0 + 1, wy)] {
-                let oy = oy.clamp(0, ih as i32 - 1) as u32;
-                for (ox, wxw) in [(x0, 1.0 - wx), (x0 + 1, wx)] {
-                    let ox = ox.clamp(0, iw as i32 - 1) as u32;
-                    let [r, g, b, a] = img.get_pixel(ox, oy).0;
-                    let w = a as f64 * wyw * wxw;
-                    wa += w;
-                    wr += w * r as f64;
-                    wg += w * g as f64;
-                    wb += w * b as f64;
-                }
-            }
-            if wa <= 0.0 {
+            let wx1 = 1024 - wx;
+            let i00 = r0 + c0;
+            let i01 = r0 + c1;
+            let i10 = r1 + c0;
+            let i11 = r1 + c1;
+            // Tap weights: alpha x 10-bit y-weight x 10-bit x-weight.
+            let w00 = src[i00 + 3] as u32 * wy1 * wx1;
+            let w01 = src[i01 + 3] as u32 * wy1 * wx;
+            let w10 = src[i10 + 3] as u32 * wy * wx1;
+            let w11 = src[i11 + 3] as u32 * wy * wx;
+            let wa = w00 + w01 + w10 + w11;
+            if wa == 0 {
                 continue;
             }
-            let af = wa.round().clamp(1.0, 255.0) as u16;
-            let r = (wr / wa).clamp(0.0, 255.0) as u8;
-            let g = (wg / wa).clamp(0.0, 255.0) as u8;
-            let b = (wb / wa).clamp(0.0, 255.0) as u8;
-            let o = (py as usize * cw as usize + px as usize) * 4;
+            let mut wr = 0u64;
+            let mut wg = 0u64;
+            let mut wb = 0u64;
+            for (w, i) in [(w00, i00), (w01, i01), (w10, i10), (w11, i11)] {
+                if w == 0 {
+                    continue;
+                }
+                wr += w as u64 * src[i] as u64;
+                wg += w as u64 * src[i + 1] as u64;
+                wb += w as u64 * src[i + 2] as u64;
+            }
+            // Weighted mean of taps: wr/wa lands in 0..=255.
+            let inv = 1.0 / wa as f64;
+            let r = (wr as f64 * inv) as u8;
+            let g = (wg as f64 * inv) as u8;
+            let b = (wb as f64 * inv) as u8;
+            // Tap weights sum to 1024*1024, so wa/2^20 is the
+            // interpolated alpha (0..255), rounded, min 1.
+            let af = ((wa + (1 << 19)) >> 20).max(1) as usize;
+            let o = row + px as usize * 4;
             let d = &mut canvas[o..o + 4];
-            d[0] = ((r as u16 * af + d[0] as u16 * (255 - af)) / 255) as u8;
-            d[1] = ((g as u16 * af + d[1] as u16 * (255 - af)) / 255) as u8;
-            d[2] = ((b as u16 * af + d[2] as u16 * (255 - af)) / 255) as u8;
-            d[3] = af.max(d[3] as u16) as u8;
+            let ia = 255 - af;
+            d[0] = MUL255[af][r as usize] + MUL255[ia][d[0] as usize];
+            d[1] = MUL255[af][g as usize] + MUL255[ia][d[1] as usize];
+            d[2] = MUL255[af][b as usize] + MUL255[ia][d[2] as usize];
+            d[3] = d[3].max(af as u8);
         }
     }
 }
