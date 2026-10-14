@@ -1069,10 +1069,8 @@ impl App {
         self.drew_content = self.matte
             || canvas.chunks_exact(4).any(|p| p[0] | p[1] | p[2] != 0);
         // speech bubble (top of window, over the sprite)
-        if let Some((text, until)) = self.bubble.clone() {
-            if Instant::now() >= until {
-                self.bubble = None;
-            } else {
+        if let Some((text, _until)) = self.bubble.clone() {
+            {
                 let s = (sf * self.scale.max(1.0)) as f32;
                 let scale = PxScale::from(10.0 * s);
                 let lh = line_height(&self.font, scale);
@@ -2238,16 +2236,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         app.walk_enabled = c.walk;
                     }
                 }
-                // Bubble expiry needs one final redraw to clear.
-                if app.bubble.is_some() {
+                // Bubble/about expiry: one final redraw clears the overlay
+                // (render itself never expires them, so a shown bubble no
+                // longer forces a redraw every tick).
+                if app.bubble.take_if(|(_, until)| now >= *until).is_some() {
                     changed = true;
                 }
-                if changed || app.about_until.is_some() {
+                if app.about_until.take_if(|until| now >= *until).is_some() {
+                    changed = true;
+                }
+                if changed {
                     if let Some(w) = &app.window {
-                        w.request_redraw();
+                        request_paint(w);
                     }
                 }
-                el.set_control_flow(ControlFlow::WaitUntil(now + Duration::from_millis(33)));
+                // Sleep until the next thing that actually changes pixels:
+                // the pet's next frame/gap, an overlay expiry, the tray
+                // pump, or the 1 Hz idle poll. Dragging and tray "Move"
+                // need pointer-rate updates; otherwise 60 Hz is waste.
+                let mut wake = app
+                    .pet
+                    .next_wake()
+                    .into_iter()
+                    .chain(app.bubble.iter().map(|(_, until)| *until))
+                    .chain(app.about_until)
+                    .min()
+                    .unwrap_or(now + Duration::from_secs(1));
+                if app.tray.is_some() {
+                    wake = wake.min(now + Duration::from_millis(100));
+                }
+                if app.blank_hide_after.is_some() {
+                    wake = wake.min(now + Duration::from_millis(250));
+                }
+                if let Some(t) = app.blank_hide_after {
+                    wake = wake.min(t);
+                }
+                if app.press.is_some() || app.move_mode.is_some() {
+                    wake = wake.min(now + Duration::from_millis(16));
+                }
+                wake = wake.max(now);
+                if app.last_idle_query.elapsed() < Duration::from_secs(1) {
+                    wake = wake.min(app.last_idle_query + Duration::from_secs(1));
+                }
+                el.set_control_flow(ControlFlow::WaitUntil(wake));
             }
             _ => {}
         }

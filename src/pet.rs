@@ -323,6 +323,14 @@ impl Pet {
     pub fn scenes_arc(&self) -> Arc<Scenes> {
         self.scenes.clone()
     }
+    /// Earliest instant the host must tick again: next frame advance, or
+    /// the idle-gap pick. `None` = no frame clock and no pending gap.
+    pub fn next_wake(&self) -> Option<Instant> {
+        if self.stack.is_empty() {
+            return self.next_at;
+        }
+        Some(self.frame_at + self.frame_dur)
+    }
 
     pub fn walk_dir(&self) -> i8 {
         self.walk_dir
