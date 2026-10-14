@@ -831,6 +831,10 @@ pub fn run(character: &str) -> Result<(), Box<dyn std::error::Error>> {
                     Key::Named(NamedKey::PageDown) => ui.scroll_by(ui.visible_rows() as i32),
                     Key::Named(NamedKey::PageUp) => ui.scroll_by(-(ui.visible_rows() as i32)),
                     Key::Named(NamedKey::Enter) => ui.play_selected(),
+                    // Space toggles the gate mark; winit reports the
+                    // spacebar as Named(Space) (Character(" ") kept for
+                    // backends that deliver it as text).
+                    Key::Named(NamedKey::Space) => ui.mark_selected(),
                     Key::Character(s) if s == " " => ui.mark_selected(),
                     Key::Named(NamedKey::ArrowRight) => ui.expand_selected(true),
                     Key::Named(NamedKey::ArrowLeft) => ui.expand_selected(false),
