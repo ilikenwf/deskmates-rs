@@ -711,6 +711,13 @@ pub fn run(character: &str) -> Result<(), Box<dyn std::error::Error>> {
             let s = window.inner_size();
             let (pw, ph) = (s.width.max(1), s.height.max(1));
             ui.size = (pw, ph);
+            // Field diagnosis: one line naming the detected scale so a
+            // user on 1.25x/1.5x fractional scaling can confirm what the
+            // window actually got (the pet's stderr lands in the log).
+            eprintln!(
+                "review: scale_factor {} ({}x{} px)",
+                window.scale_factor(), pw, ph
+            );
             match Ui::build_pixels(pw, ph, &window) {
                 Some(p) => {
                     ui.pixels = Some(p);
@@ -725,13 +732,39 @@ pub fn run(character: &str) -> Result<(), Box<dyn std::error::Error>> {
         }
         Event::WindowEvent { event, .. } => match event {
             WindowEvent::Resized(sz) => {
+                // Physical size changed (WM configure, DPI follow-up).
+                // The canvas and swapchain are sized in PHYSICAL px, so
+                // fractional scales must never truncate them: rebuild
+                // at the exact new size and repaint immediately.
                 if sz.width > 0 && sz.height > 0 && (sz.width, sz.height) != ui.size {
                     ui.size = (sz.width, sz.height);
                     if let Some(w) = ui.window.clone() {
                         if let Some(p) = Ui::build_pixels(sz.width, sz.height, &w) {
                             ui.pixels = Some(p);
                         }
+                        w.request_redraw();
                     }
+                }
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                // DPI change (monitor move / fractional-scale toggle).
+                // Metrics read `window.scale_factor()` live, but the
+                // canvas + swapchain are physical-px: rebuild now at the
+                // current inner size — winit *usually* follows with a
+                // Resized carrying the new physical size, yet when the
+                // physical size happens to be unchanged no Resized
+                // arrives, and skipping the rebuild would stretch the
+                // old buffer. Then repaint with the new metrics.
+                let _ = scale_factor;
+                if let Some(w) = ui.window.clone() {
+                    let sz = w.inner_size();
+                    if sz.width > 0 && sz.height > 0 {
+                        ui.size = (sz.width, sz.height);
+                        if let Some(p) = Ui::build_pixels(sz.width, sz.height, &w) {
+                            ui.pixels = Some(p);
+                        }
+                    }
+                    w.request_redraw();
                 }
             }
             WindowEvent::Focused(_) | WindowEvent::RedrawRequested => {
