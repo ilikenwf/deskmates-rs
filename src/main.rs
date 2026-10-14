@@ -627,8 +627,6 @@ struct App {
     last_move: Instant,
     /// Fractional window x for smooth walking.
     walk_x: f64,
-    /// Last scene whose frames were pre-decoded (jank-free playback).
-    preloaded: String,
     /// Wave archive playback for ` !name` script tokens.
     audio: crate::audio::Audio,
     /// X11 window shaper (transparent clipping); unused on other platforms.
@@ -797,7 +795,6 @@ impl App {
         self.audio = crate::audio::Audio::new(
             assets_root().join("characters").join(name).join("sounds"),
         );
-        self.preloaded = String::new();
         self.bubble = None;
         self.menu_open = false;
         self.classic_open = false;
@@ -1516,7 +1513,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tray_classic: Vec::new(),
         last_move: Instant::now(),
         walk_x: 0.0,
-        preloaded: String::new(),
         hidden_by_blank: false,
         fence_rest: None,
         off_since: None,
@@ -1997,19 +1993,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         w.set_visible(true);
                         w.set_window_level(WindowLevel::AlwaysOnTop);
                         app.hidden_by_blank = false;
-                    }
-                }
-                // Pre-decode the whole current scene off-thread, then drop
-                // other scenes' frames: playback never decodes mid-frame
-                // and memory stays bounded to the active scene.
-                if let Some(s) = app.pet.cur_scene() {
-                    if s != app.preloaded {
-                        app.preloaded = s.clone();
-                        let sc = app.pet.scenes_arc();
-                        std::thread::spawn(move || {
-                            sc.preload(&s);
-                            sc.evict_except(&s);
-                        });
                     }
                 }
                 // Agent replies arriving from the worker thread.

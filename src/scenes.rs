@@ -13,6 +13,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use parking_lot::Mutex;
 use std::io::Read;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
@@ -79,8 +80,10 @@ pub struct Scenes {
     pub scenes: HashMap<String, Scene>,
     /// Parsed FAZ containers keyed by scene name; frames decode on demand.
     faz: HashMap<String, faz::Faz>,
-    /// scene -> (frame id -> decoded RGBA), kept for the process lifetime.
-    cache: Mutex<HashMap<(String, u32), Option<std::sync::Arc<RgbaImage>>>>,
+    /// Decoded-frame LRU (bounded by `Lru::CAP` frames): playback decodes
+    /// each frame at most once per cache residency, and scene changes never
+    /// evict the frames the next scene shares (behaviors, base poses).
+    cache: Mutex<Lru>,
     /// Names loaded from `behaviors/` (common.FAS etc.): def sources, never
     /// part of the random idle pool or the window-size vote.
     pub behaviors: std::collections::HashSet<String>,
@@ -300,7 +303,7 @@ impl Scenes {
         if scenes.is_empty() {
             return Err(format!("{}: no scenes parsed", sdir.display()));
         }
-        Ok(Scenes { dir: dir.to_path_buf(), scenes, faz: fazs, cache: Mutex::new(HashMap::new()), behaviors, touch: touch_map })
+        Ok(Scenes { dir: dir.to_path_buf(), scenes, faz: fazs, cache: Mutex::new(Lru::new()), behaviors, touch: touch_map })
     }
 
     pub fn frame(&self, scene: &str, id: u32) -> Option<std::sync::Arc<RgbaImage>> {
@@ -328,32 +331,15 @@ impl Scenes {
             }
         }
         let img = img.map(std::sync::Arc::new);
-        self.cache.lock().insert(key, img.clone());
+        self.cache.lock().put(key, img.clone());
         img
     }
 
-    /// Decode every frame of `scene` into the cache (called from a helper
-    /// thread when a scene starts, so playback never decodes mid-frame).
-    pub fn preload(&self, scene: &str) {
-        let Some(f) = self.faz.get(scene) else { return };
-        for id in f.frames.keys() {
-            let key = (scene.to_string(), *id as u32);
-            if self.cache.lock().contains_key(&key) {
-                continue;
-            }
-            let img = faz::decode_frame(f, *id).map(std::sync::Arc::new);
-            self.cache.lock().insert(key, img);
-        }
-    }
 
-    /// Drop cached frames of every other scene (bounds memory to roughly
-    /// the active scene; reaction frames re-decode on demand).
-    pub fn evict_except(&self, keep: &str) {
-        self.cache
-            .lock()
-            .retain(|(s, _), _| s == keep || self.behaviors.contains(s));
+    /// Frames resident in the cache (tests).
+    pub fn cache_len(&self) -> usize {
+        self.cache.lock().map.len()
     }
-
     /// All entry-point scene names across all scenes (idle pool).
     pub fn all_entries(&self) -> Vec<(String, String)> {
         let mut out = Vec::new();
@@ -367,6 +353,46 @@ impl Scenes {
         }
         out.sort();
         out
+    }
+}
+
+/// Bounded decoded-frame cache: HashMap + recency deque. `CAP` frames of
+/// 123x123 RGBA is ~75 MB worst case; scenes hold 2-12k frames each, so
+/// the working set (current scene + behavior poses) always fits and
+/// playback never re-decodes.
+pub struct Lru {
+    map: HashMap<(String, u32), Option<std::sync::Arc<RgbaImage>>>,
+    order: VecDeque<(String, u32)>,
+}
+
+impl Lru {
+    const CAP: usize = 640;
+
+    fn new() -> Lru {
+        Lru { map: HashMap::new(), order: VecDeque::new() }
+    }
+
+    fn get(&mut self, key: &(String, u32)) -> Option<&Option<std::sync::Arc<RgbaImage>>> {
+        if self.map.contains_key(key) {
+            self.touch(key);
+        }
+        self.map.get(key)
+    }
+
+
+    fn touch(&mut self, key: &(String, u32)) {
+        self.order.retain(|k| k != key);
+        self.order.push_back(key.clone());
+    }
+
+    fn put(&mut self, key: (String, u32), img: Option<std::sync::Arc<RgbaImage>>) {
+        self.map.insert(key.clone(), img);
+        self.touch(&key);
+        while self.map.len() > Self::CAP {
+            if let Some(old) = self.order.pop_front() {
+                self.map.remove(&old);
+            }
+        }
     }
 }
 
