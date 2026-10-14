@@ -150,6 +150,17 @@ struct Ui {
     pixels: Option<pixels::Pixels<'static>>,
     size: (u32, u32),
     mouse_pos: (f64, f64),
+    /// Keyboard/click selection, tracked by row identity (scene, entry)
+    /// so it survives rebuilds (collapse/expand) and character switches
+    /// clear it. Shared with the mouse: clicking a name selects the row
+    /// exactly like Arrow keys do. Drawn as a grey banded row with a
+    /// shadow border — distinct from the navy hover highlight on the
+    /// name cell, so keyboard focus is visible even when the pointer
+    /// rests elsewhere.
+    selected: Option<(String, Option<String>)>,
+    /// Live modifier state (winit 0.30: delivered via ModifiersChanged);
+    /// gates Ctrl+E export.
+    mods: winit::event::Modifiers,
     /// Last row this browser asked the pet to play: (scene, entry).
     /// Rendered with a ▶ marker so the playing row is obvious.
     playing: Option<(String, Option<String>)>,
@@ -220,7 +231,11 @@ impl Ui {
         self.character = name.to_string();
         self.scenes = load_tree(name);
         self.expanded.clear();
+        // Tree reload is the ONLY scroll reset: the list lands at the
+        // top on a character switch, and nothing else (resize storms,
+        // clamps, redraws) may move it.
         self.scroll = 0;
+        self.selected = None;
         self.rebuild_rows();
         self.status = format!("Switched the pet to {}.", display_name(name));
     }
@@ -276,31 +291,131 @@ impl Ui {
             let Some((rowi, zone)) = hit_test(&self.hits, x, y) else {
                 return;
             };
-            let Some(row) = self.rows.get(rowi).cloned() else { return };
-            match zone {
-                Zone::Play => {
-                    self.play_row(&row);
-                    self.status = format!("Playing {} on the pet.", row.name);
+            self.act(rowi, zone);
+        }
+    }
+
+    /// Perform a zone action on a row — shared by mouse clicks and the
+    /// keyboard (Enter plays, Space marks, Left/Right collapse). Any
+    /// action also moves the keyboard selection onto the row, so the
+    /// two input methods stay in sync.
+    fn act(&mut self, rowi: usize, zone: Zone) {
+        let Some(row) = self.rows.get(rowi).cloned() else { return };
+        self.selected = Some((row.scene.clone(), row.entry.clone()));
+        match zone {
+            Zone::Play => {
+                self.play_row(&row);
+                self.status = format!("Playing {} on the pet.", row.name);
+            }
+            Zone::Mark => {
+                self.toggle_mark(&row.name);
+            }
+            Zone::Toggle => {
+                if !self.expanded.remove(&row.scene) {
+                    self.expanded.insert(row.scene.clone());
                 }
-                Zone::Mark => {
-                    if !self.marks.remove(&row.name) {
-                        self.marks.insert(row.name.clone());
-                    }
-                    self.set_title();
-                    self.status = format!(
-                        "{} marked — {} total. Export writes them.",
-                        row.name,
-                        self.marks.len()
-                    );
-                }
-                Zone::Toggle => {
-                    if !self.expanded.remove(&row.scene) {
-                        self.expanded.insert(row.scene.clone());
-                    }
-                    self.rebuild_rows();
-                }
+                self.rebuild_rows();
             }
         }
+        self.ensure_visible();
+    }
+
+    fn toggle_mark(&mut self, name: &str) {
+        if !self.marks.remove(name) {
+            self.marks.insert(name.to_string());
+        }
+        self.set_title();
+        self.status = format!(
+            "{} marked — {} total. Export writes them.",
+            name,
+            self.marks.len()
+        );
+    }
+
+    /// Index of the selected row in the current row list (identity
+    /// lookup, so rebuilds keep the selection).
+    fn selected_index(&self) -> Option<usize> {
+        let (s, e) = self.selected.as_ref()?;
+        self.rows.iter().position(|r| &r.scene == s && &r.entry == e)
+    }
+
+    /// Move the selection by `delta` rows and scroll it into view.
+    /// With nothing selected yet, Down picks the first row and Up the
+    /// last — the classic listbox behaviour.
+    fn move_selection(&mut self, delta: i32) {
+        if self.rows.is_empty() {
+            return;
+        }
+        let last = self.rows.len() - 1;
+        let next = match self.selected_index() {
+            None => {
+                if delta > 0 { 0 } else { last }
+            }
+            Some(i) => (i as i64 + delta as i64).clamp(0, last as i64) as usize,
+        };
+        let row = &self.rows[next];
+        self.selected = Some((row.scene.clone(), row.entry.clone()));
+        self.ensure_visible();
+    }
+
+    /// Scroll just enough to bring the selection into the viewport.
+    fn ensure_visible(&mut self) {
+        let vis = self.visible_rows().max(1);
+        if let Some(i) = self.selected_index() {
+            if i < self.scroll {
+                self.scroll = i;
+            } else if i + 1 >= self.scroll + vis {
+                self.scroll = i + 1 - vis;
+            }
+        }
+        self.scroll = clamp_scroll(self.scroll, self.rows.len(), vis);
+    }
+
+    fn scroll_home(&mut self) {
+        self.scroll = 0;
+    }
+
+    fn scroll_end(&mut self) {
+        let vis = self.visible_rows().max(1);
+        self.scroll = clamp_scroll(usize::MAX, self.rows.len(), vis);
+    }
+
+    /// Enter: play the selected row.
+    fn play_selected(&mut self) {
+        let Some(i) = self.selected_index() else {
+            self.status = "Nothing selected — Up/Down picks a row first.".into();
+            return;
+        };
+        let row = self.rows[i].clone();
+        self.play_row(&row);
+        self.status = format!("Playing {} on the pet.", row.name);
+    }
+
+    /// Space: toggle the gate mark on the selected row.
+    fn mark_selected(&mut self) {
+        let Some(i) = self.selected_index() else {
+            self.status = "Nothing selected — Up/Down picks a row first.".into();
+            return;
+        };
+        let name = self.rows[i].name.clone();
+        self.toggle_mark(&name);
+    }
+
+    /// Left/Right: collapse / expand the scene owning the selected row
+    /// (an entry row acts on its parent scene, like a treeview).
+    fn expand_selected(&mut self, expand: bool) {
+        let Some(i) = self.selected_index() else { return };
+        let scene = self.rows[i].scene.clone();
+        if self.expanded.contains(&scene) == expand {
+            return;
+        }
+        if expand {
+            self.expanded.insert(scene);
+        } else {
+            self.expanded.remove(&scene);
+        }
+        self.rebuild_rows();
+        self.ensure_visible();
     }
 
     fn scroll_by(&mut self, lines: i32) {
@@ -390,7 +505,7 @@ impl Ui {
             m as i32, btn_y, btn_w, btn_h, "Export", true, false, false,
         );
         let marked = format!(
-            "{} marked — click a name to play it on the pet; tick gate? to mark, Export to save.",
+            "{} marked — click/Enter plays; Space marks; arrows move, Left/Right collapse/expand; Ctrl+E exports.",
             self.marks.len()
         );
         retro::statusbar(
@@ -426,11 +541,21 @@ impl Ui {
         // and a configure storm must never move the list on its own —
         // only `select_character` resets the scroll.
         let start = clamp_scroll(self.scroll, self.rows.len(), vis);
+        let sel = self.selected_index();
         for (vi, ri) in (start..self.rows.len()).enumerate().take(vis) {
             let row = &self.rows[ri];
             let y = ty + 2 + hh + (vi as i32) * row_h;
             if y + row_h > ty + th {
                 break; // never paint over the footer
+            }
+            if sel == Some(ri) {
+                // Keyboard/click selection: full-width grey band with a
+                // shadow frame (Win95 focus-row look). Deliberately not
+                // navy — the navy cell is pointer hover, and the two
+                // must stay distinguishable when they land on
+                // different rows.
+                crate::fill_rect(&mut canvas, w, h, tx + 2, y, tw - 4, row_h, retro::LIGHT);
+                crate::stroke_rect(&mut canvas, w, h, tx + 2, y, tw - 4, row_h, retro::SHADOW);
             }
             let baseline = y as f32 + (row_h as f32 - lh) / 2.0 + lh;
             let (tri_w, name_x);
@@ -557,6 +682,8 @@ pub fn run(character: &str) -> Result<(), Box<dyn std::error::Error>> {
         pixels: None,
         size: (W, H),
         mouse_pos: (0.0, 0.0),
+        selected: None,
+        mods: Default::default(),
         playing: None,
     };
     ui.rebuild_rows();
@@ -643,18 +770,31 @@ pub fn run(character: &str) -> Result<(), Box<dyn std::error::Error>> {
                     ui.window.as_ref().map(|w| w.request_redraw());
                 }
             }
-            WindowEvent::KeyboardInput { event: k, .. } => {
-                if k.state == ElementState::Pressed {
-                    match k.logical_key {
-                        Key::Named(NamedKey::Escape) => el.exit(),
-                        Key::Named(NamedKey::ArrowDown) => ui.scroll_by(1),
-                        Key::Named(NamedKey::ArrowUp) => ui.scroll_by(-1),
-                        Key::Named(NamedKey::PageDown) => ui.scroll_by(ui.visible_rows() as i32),
-                        Key::Named(NamedKey::PageUp) => ui.scroll_by(-(ui.visible_rows() as i32)),
-                        _ => {}
+            WindowEvent::ModifiersChanged(m) => ui.mods = m,
+            WindowEvent::KeyboardInput { event: k, .. } => if k.state == ElementState::Pressed {
+                let ctrl = ui.mods.state().control_key();
+                match &k.logical_key {
+                    Key::Named(NamedKey::Escape) => el.exit(),
+                    // Ctrl+E exports the marks, same as the button.
+                    Key::Character(s) if ctrl && s.as_str().eq_ignore_ascii_case("e") => {
+                        ui.export();
                     }
-                    ui.window.as_ref().map(|w| w.request_redraw());
+                    // Up/Down move the selection (shared with the mouse);
+                    // the list only scrolls when the selection would leave
+                    // the viewport, like a real treeview.
+                    Key::Named(NamedKey::ArrowDown) => ui.move_selection(1),
+                    Key::Named(NamedKey::ArrowUp) => ui.move_selection(-1),
+                    Key::Named(NamedKey::Home) => ui.scroll_home(),
+                    Key::Named(NamedKey::End) => ui.scroll_end(),
+                    Key::Named(NamedKey::PageDown) => ui.scroll_by(ui.visible_rows() as i32),
+                    Key::Named(NamedKey::PageUp) => ui.scroll_by(-(ui.visible_rows() as i32)),
+                    Key::Named(NamedKey::Enter) => ui.play_selected(),
+                    Key::Character(s) if s == " " => ui.mark_selected(),
+                    Key::Named(NamedKey::ArrowRight) => ui.expand_selected(true),
+                    Key::Named(NamedKey::ArrowLeft) => ui.expand_selected(false),
+                    _ => {}
                 }
+                ui.window.as_ref().map(|w| w.request_redraw());
             }
             WindowEvent::CloseRequested => el.exit(),
             _ => {}
