@@ -59,8 +59,37 @@ pub const ADULT_SCENES: &[&str] = &[
     "fb_s_streak", // streaker with crotch mosaic
 ];
 
+/// Adults-only **touch reactions** (the `T0x…….._Name` hotspot defs in
+/// each character's touch.FAS). Curated by visual inspection of 12-frame
+/// strips for every voiced named hotspot
+/// (`cargo test touch_strips -- --ignored`, 2026-10-14): same rule as
+/// scenes — exposed breasts/genitals gate; pastie-covered toplessness
+/// does NOT (Tahni's Secret A/B stop at pasties: no gate), butt-only
+/// views do not (FatB's Pixel Moon), and covered catsuit/leotard teasing
+/// does not (Kahli's Basic Instinct, Hot Touch, Bum Bump, Head Job).
+/// These are def names, not scene names, so they live outside
+/// `ADULT_SCENES` (whose existence test walks scene/entry containers).
+pub const ADULT_TOUCH: &[&str] = &[
+    // Kahli
+    "T0x454545_Secret_A_Lap_Dance",          // full frontal on the chair
+    "T0xa9a9a9_Secret_B_Pole_Dance",         // full frontal on the pole
+    "T0xff40ff_Breast_R_A_Flasher_DEMO",   // coat-off full frontal (variant)
+    "T0x80ffff_Breast_R_B_Flasher",         // coat-off full frontal
+    "T0x8040ff_Breast_L_B_Shower",          // nude shower silhouette
+    "T0xc0ffff_Breast_L_A_Shrink",           // shrinking bra, exposed
+    "T0xff40ff_Breast_R_A_Ape_Shit",         // ape transformation nudity
+    // Maeka
+    "T0x003b7f_Pubes",                       // full frontal
+    "T0x660066_Breast_L_DEMO",               // bare breasts (pasties)
+];
+
 pub fn is_adult(scene: &str) -> bool {
     ADULT_SCENES.contains(&scene)
+}
+
+/// Gate predicate for touch-reaction defs.
+pub fn is_adult_touch(def: &str) -> bool {
+    ADULT_TOUCH.contains(&def)
 }
 
 #[cfg(test)]
@@ -95,5 +124,29 @@ mod tests {
             }
         }
         assert_eq!(checked, ADULT_SCENES.len(), "some gated names missing from assets");
+    }
+
+    #[test]
+    fn gated_touch_defs_exist_in_shipped_assets() {
+        // Same rot check as scenes: every gated touch def's hotspot
+        // *color* must exist in some shipped character's loaded touch
+        // container. Prefix, not full name: the named def can live in
+        // the unshipped `_demo` container (e.g. Kahli's A_Flasher_DEMO)
+        // while the color's state aliases — which embed the animation
+        // frames — ship in touch.FAS and are what the gate blocks.
+        for g in ADULT_TOUCH {
+            let color = &g[..9];
+            let found = ["tahni", "maeka", "kahli", "fatb"].iter().any(|c| {
+                let dir = format!("{}/assets/characters/{c}", env!("CARGO_MANIFEST_DIR"));
+                crate::scenes::Scenes::load(std::path::Path::new(&dir))
+                    .map(|sc| {
+                        sc.scenes
+                            .get("touch")
+                            .is_some_and(|t| t.raw.keys().any(|k| k.starts_with(color)))
+                    })
+                    .unwrap_or(false)
+            });
+            assert!(found, "gated touch color {color} missing from assets");
+        }
     }
 }

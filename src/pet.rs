@@ -443,10 +443,26 @@ impl Pet {
             }
         }
         if let Some((_, _, def)) = best {
-            self.play("touch", &def);
-            return;
+            // Adults-only hotspot reactions stay behind the gate. The
+            // state aliases (`T0x……..up/down/start`) embed the animation
+            // frames directly — no textual link to the named def — so
+            // the gate keys on the hotspot *color*: a color is gated
+            // when its named def (`T0x…….._Name`) is. A gated zone
+            // click falls back to a safe random reaction.
+            if self.adult || !Self::hotspot_gated(&base) {
+                self.play("touch", &def);
+                return;
+            }
         }
         self.touch();
+    }
+
+    /// True when the hotspot color `base` (`T0x` + 6 hex) belongs to a
+    /// gated named reaction.
+    fn hotspot_gated(base: &str) -> bool {
+        crate::adult::ADULT_TOUCH
+            .iter()
+            .any(|g| g.strip_prefix(base).is_some_and(|rest| rest.starts_with('_')))
     }
     /// Play a touch-reaction definition by exact name (review-browser
     /// `touch:<def>` handoff). Returns false when the character has no
@@ -479,6 +495,15 @@ impl Pet {
                 .raw
                 .keys()
                 .filter(|k| k.starts_with("T0x") && s.raw.get(*k).is_some_and(|b| b.windows(2).any(|w| w == b" !")))
+                // Adults-only reactions stay behind the gate, keyed on
+                // the hotspot color: aliases (`T0x……..down`) embed the
+                // frames directly, so match the `T0x` + 6 hex prefix
+                // against the gated named defs.
+                .filter(|k| {
+                    self.adult
+                        || (!crate::adult::is_adult_touch(k)
+                            && !Self::hotspot_gated(&k.chars().take(9).collect::<String>()))
+                })
                 .cloned()
                 .collect();
             if let Some(def) = voiced.choose(&mut rand::rng()) {
@@ -923,6 +948,46 @@ mod gating_tests {
         };
         let hits = (0..1000).filter(|_| pet.adult_pref_roll(next())).count();
         assert!((500..=700).contains(&hits), "expected ~600/1000 adult-preferred draws, got {hits}");
+    }
+
+    /// Touch-reaction gating: with the gate closed, a random touch
+    /// reaction must never resolve to a gated hotspot color (named def
+    /// OR its state aliases, which embed the frames directly); with the
+    /// gate open, gated reactions become reachable again.
+    #[test]
+    fn touch_reactions_respect_the_gate() {
+        let sc = crate::scenes::Scenes::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/characters/kahli"),
+        )
+        .unwrap();
+        // Color-prefix predicate: gated named def colors yes, plain
+        // hotspot colors no.
+        assert!(Pet::hotspot_gated("T0x454545")); // Secret_A_Lap_Dance
+        assert!(!Pet::hotspot_gated("T0x00ff00")); // Bum_Bump stays safe
+
+        let mut pet = Pet::new(std::sync::Arc::new(sc), false);
+        for _ in 0..200 {
+            pet.touch();
+            let last = pet.recent.front().expect("touch played nothing");
+            if last.0 == "touch" {
+                assert!(
+                    !Pet::hotspot_gated(&last.1.chars().take(9).collect::<String>()),
+                    "gated touch reaction {} leaked with the gate closed",
+                    last.1
+                );
+            }
+        }
+        pet.set_adult(true);
+        let mut saw_gated = false;
+        for _ in 0..200 {
+            pet.touch();
+            if let Some(l) = pet.recent.front() {
+                if l.0 == "touch" && Pet::hotspot_gated(&l.1.chars().take(9).collect::<String>()) {
+                    saw_gated = true;
+                }
+            }
+        }
+        assert!(saw_gated, "gate open but no gated touch reaction ever played");
     }
 }
 

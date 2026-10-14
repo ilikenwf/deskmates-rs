@@ -1141,6 +1141,89 @@ mod audit_strips {
 }
 
 #[cfg(test)]
+mod touch_strips {
+    use super::*;
+    /// Ignored diagnostic: 6-frame strip for every *named* voiced touch
+    /// hotspot def (frames live in the touch.FAS container itself), for
+    /// visual gating decisions on the suggestive zones.
+    #[test]
+    #[ignore]
+    fn touch_strips() {
+        for ch in ["tahni", "maeka", "kahli", "fatb"] {
+            // reaction frames can live in touch.FAS or touch_demo.FAS
+            let mut gs: Vec<Faz> = Vec::new();
+            for cf in ["touch.fas.gz", "touch_demo.fas.gz"] {
+                let Ok(gz) = std::fs::File::open(format!(
+                    "{}/assets/characters/{ch}/behaviors/{cf}",
+                    env!("CARGO_MANIFEST_DIR")
+                )) else { continue };
+                let mut raw = Vec::new();
+                std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(gz), &mut raw).unwrap();
+                if let Some(g) = parse_faz(&raw) {
+                    gs.push(g);
+                }
+            }
+            let mut all: Vec<(String, Vec<u8>)> = Vec::new();
+            for g in &gs {
+                let (_e, defs) = script_defs(g);
+                for (k, b) in defs {
+                    all.push((k.clone(), b.clone()));
+                }
+            }
+            let mut seen: std::collections::HashSet<String> = Default::default();
+            for (name, body) in all.iter() {
+                // named voiced hotspot defs only: T0x......_Name with a sound
+                if !name.starts_with("T0x") || !name.contains('_') {
+                    continue;
+                }
+                if !body.windows(2).any(|w| w == b" !") || !seen.insert(name.clone()) {
+                    continue;
+                }
+                // frame ids referenced by the body (4-5 digit runs)
+                let mut ids: std::collections::BTreeSet<u32> = Default::default();
+                let bs: &[u8] = body;
+                let mut p = 0usize;
+                while p < bs.len() {
+                    if bs[p].is_ascii_digit() {
+                        let (v, n) = read_digits(bs, p, 5);
+                        if n >= 4 {
+                            ids.insert(v);
+                            p += n;
+                            continue;
+                        }
+                    }
+                    p += 1;
+                }
+                let ids: Vec<u16> = ids
+                    .into_iter()
+                    .filter(|i| gs.iter().any(|g| g.frames.contains_key(&(*i as u16))))
+                    .map(|i| i as u16)
+                    .collect();
+                if ids.is_empty() {
+                    println!("{ch}/{name}: no frames");
+                    continue;
+                }
+                let mut strip = image::ImageBuffer::<image::Rgba<u8>, Vec<u8>>::from_pixel(12 * 200, 260, image::Rgba([30, 30, 30, 255]));
+                for (k, frac) in [0.04f32, 0.12, 0.2, 0.28, 0.36, 0.44, 0.52, 0.6, 0.68, 0.76, 0.88, 0.98].iter().enumerate() {
+                    let id = ids[((ids.len() as f32 * *frac) as usize).min(ids.len() - 1)];
+                    let Some(fr) = gs.iter().find_map(|g| decode_frame(g, id)) else { continue };
+                    let (w, h) = (fr.width(), fr.height());
+                    for y in 0..h.min(260) {
+                        for x in 0..w.min(200) {
+                            let p = fr.get_pixel(x, y).0;
+                            if p[3] > 40 {
+                                strip.put_pixel(x + k as u32 * 200, y, image::Rgba(p));
+                            }
+                        }
+                    }
+                }
+                strip.save(format!("/tmp/tstrips/{ch}_{name}.png")).unwrap();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod touch_tests {
     use super::*;
 
@@ -1181,3 +1264,4 @@ mod touch_tests {
         assert!(hit, "no def color present in hotspot palette");
     }
 }
+

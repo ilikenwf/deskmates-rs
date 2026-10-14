@@ -2,7 +2,10 @@
 //! WM-managed winit window (same fork pattern as [`crate::ask_ui`]) that
 //! lists the running pet's whole scene set as a two-column scrollable
 //! tree — scene rows expand to their entries (sub-scenes) — so the adult
-//! blocklist can be curated down to the entry level.
+//! blocklist can be curated down to the entry level. A synthetic
+//! "Touch reactions" scene at the bottom lists every voiced click-
+//! hotspot def (`T0x…….._Name`) the same way, gated through
+//! [`crate::adult::ADULT_TOUCH`].
 //!
 //! Run as: `deskmates-rs --review-ui [--character NAME]` (the pet forks
 //! it when `--review` starts). Row clicks hand play requests to the pet
@@ -31,6 +34,9 @@ use winit::window::{Window, WindowAttributes};
 
 const W: u32 = 520;
 const H: u32 = 640;
+
+/// Synthetic tree scene holding the touch-reaction hotspot defs.
+pub const TOUCH_SCENE: &str = "Touch reactions";
 
 /// One visible tree row: a scene (entry None) or one of its entries.
 #[derive(Clone)]
@@ -118,7 +124,12 @@ fn parent_died(_start: u32) -> bool {
 }
 
 /// The character's playable scenes, sorted: (scene name, entry names).
-/// Behaviors (common.FAS etc.) are def sources, never review rows.
+/// Behaviors (common.FAS etc.) are def sources, never review rows —
+/// except `touch`: its *named voiced hotspot defs* (`T0x…….._Name`) are
+/// curated exactly like entries (each is a click reaction with its own
+/// animation + voice line), so they appear as one synthetic "Touch
+/// reactions" scene. The state-machine aliases (`T0x……..up/down/...`)
+/// and bare frame refs are plumbing, not content: filtered out.
 fn load_tree(character: &str) -> Vec<(String, Vec<String>)> {
     let dir = assets_root().join("characters").join(character);
     let Ok(sc) = crate::scenes::Scenes::load(&dir) else {
@@ -127,6 +138,26 @@ fn load_tree(character: &str) -> Vec<(String, Vec<String>)> {
     let mut map: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (s, e) in sc.all_entries() {
         map.entry(s).or_default().push(e);
+    }
+    if let Some(t) = sc.scenes.get("touch") {
+        let mut defs: Vec<String> = t
+            .raw
+            .iter()
+            .filter(|(k, body)| {
+                // named voiced hotspot def: T0x + 6 hex + `_Name`, body
+                // carries at least one ` !sound` token
+                k.starts_with("T0x")
+                    && k.len() > 10
+                    && k.as_bytes().get(9) == Some(&b'_')
+                    && body.windows(2).any(|w| w == b" !")
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        defs.sort();
+        defs.dedup();
+        if !defs.is_empty() {
+            map.insert(TOUCH_SCENE.to_string(), defs);
+        }
     }
     map.into_iter().collect()
 }
@@ -169,27 +200,22 @@ struct Ui {
 impl Ui {
     fn rebuild_rows(&mut self) {
         self.rows.clear();
-        for (scene, entries) in &self.scenes {
-            let expanded = self.expanded.contains(scene);
-            self.rows.push(Row {
-                scene: scene.clone(),
-                entry: None,
-                name: scene.clone(),
-                gated: crate::adult::is_adult(scene),
-                expanded,
-            });
-            if expanded {
-                for e in entries {
-                    self.rows.push(Row {
-                        scene: scene.clone(),
-                        entry: Some(e.clone()),
-                        name: e.clone(),
-                        gated: crate::adult::is_adult(e) || crate::adult::is_adult(scene),
-                        expanded: false,
-                    });
-                }
+        // Touch reactions sort last: pull the synthetic scene out of the
+        // map (BTreeMap would otherwise float it above the lowercase
+        // scene names) and append it after the real scenes.
+        let scenes = std::mem::take(&mut self.scenes);
+        let mut touch: Option<(String, Vec<String>)> = None;
+        for s in &scenes {
+            if s.0 == TOUCH_SCENE {
+                touch = Some(s.clone());
+            } else {
+                self.push_scene(&s.0, &s.1, false);
             }
         }
+        if let Some((name, defs)) = &touch {
+            self.push_scene(name, defs, true);
+        }
+        self.scenes = scenes;
         // A treeview always carries a current row: pre-select the first
         // one whenever nothing is selected (startup, character switch).
         // Keeps "Down x3 + Enter" deterministic — it plays the 4th row
@@ -197,6 +223,34 @@ impl Ui {
         if self.selected.is_none() {
             if let Some(r) = self.rows.first() {
                 self.selected = Some((r.scene.clone(), r.entry.clone()));
+            }
+        }
+    }
+
+    /// One scene row plus its expanded entry rows. `touch` entries are
+    /// hotspot *def* names: their gate flag reads `ADULT_TOUCH`.
+    fn push_scene(&mut self, scene: &str, entries: &[String], touch: bool) {
+        let expanded = self.expanded.contains(scene);
+        self.rows.push(Row {
+            scene: scene.to_string(),
+            entry: None,
+            name: scene.to_string(),
+            gated: crate::adult::is_adult(scene),
+            expanded,
+        });
+        if expanded {
+            for e in entries {
+                self.rows.push(Row {
+                    scene: scene.to_string(),
+                    entry: Some(e.clone()),
+                    name: e.clone(),
+                    gated: if touch {
+                        crate::adult::is_adult_touch(e)
+                    } else {
+                        crate::adult::is_adult(e) || crate::adult::is_adult(scene)
+                    },
+                    expanded: false,
+                });
             }
         }
     }
@@ -222,6 +276,12 @@ impl Ui {
 
     fn play_row(&mut self, row: &Row) {
         match &row.entry {
+            // The synthetic header row has nothing to play; expand it.
+            None if row.scene == TOUCH_SCENE => {}
+            // Touch-reaction rows play through the `touch:<def>`
+            // handoff: the defs live in the behaviors container, not the
+            // scene-entry table the `scene\nentry` protocol expects.
+            Some(e) if row.scene == TOUCH_SCENE => self.send(&format!("touch:{e}")),
             None => self.send(&format!("{}\n", row.scene)),
             Some(e) => self.send(&format!("{}\n{e}\n", row.scene)),
         }
