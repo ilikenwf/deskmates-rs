@@ -373,8 +373,17 @@ impl Ui {
         self.selected = Some((row.scene.clone(), row.entry.clone()));
         match zone {
             Zone::Play => {
-                self.play_row(&row);
-                self.status = format!("Playing {} on the pet.", row.name);
+                // The synthetic Touch header has nothing to play: its
+                // name cell expands/collapses like the triangle does.
+                if row.scene == TOUCH_SCENE {
+                    if !self.expanded.remove(&row.scene) {
+                        self.expanded.insert(row.scene.clone());
+                    }
+                    self.rebuild_rows();
+                } else {
+                    self.play_row(&row);
+                    self.status = format!("Playing {} on the pet.", row.name);
+                }
             }
             Zone::Mark => {
                 self.toggle_mark(&row.name);
