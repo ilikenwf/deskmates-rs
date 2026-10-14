@@ -177,31 +177,78 @@ impl Scenes {
                 .and_then(|s| s.to_str())
                 .map(|s| s.trim_end_matches(".bin.gz").to_string())
                 .unwrap_or_else(|| f.name.clone());
-            // Original-author wiring bug (RC3): `all` points at
-            // maeka_S021_Big_Dance_sequence_aa/_ab, which resolve via
-            // the common.FAS fallback to sword-TRAINING frames. The
-            // actual choreography (frames 4000-4154, visually verified)
-            // lives in the orphaned trailing-underscore defs nothing
-            // called. Wire the entry to the real dance.
-            if name == "maeka_dancer" {
-                const DANCE: &str = "{maeka_S021_Big_Dance_sequence_aa_|maeka_S021_Big_Dance_sequence_ab_},pause";
-                if defmap.contains_key("maeka_S021_Big_Dance_sequence_aa_") {
-                    let v = faz::parse_reflist(DANCE.as_bytes())
-                        .into_iter()
-                        .map(|t| match t {
-                            faz::Tok::Frame { id, x, y, rep } => {
-                                Def { id, x, y, rep, name: String::new(), sound: String::new() }
-                            }
-                            faz::Tok::Name { name, rep } => {
-                                Def { id: 0, x: 0, y: 0, rep, name, sound: String::new() }
-                            }
-                            faz::Tok::Sound { name } => {
-                                Def { id: 0, x: 0, y: 0, rep: 1, name: String::new(), sound: name }
-                            }
-                        })
-                        .collect();
-                    rawmap.insert("all".to_string(), DANCE.as_bytes().to_vec());
-                    defmap.insert("all".to_string(), v);
+            // Original-author wiring bug (RC3), maeka: the entry defs the
+            // shipped `all` scripts name (`maeka_S021_Big_Dance_sequence_aa`
+            // etc.) are stubs whose bodies are the
+            // `{common_sword_training_long_flipped|…}` choice — every menu
+            // entry of these scenes played the SAME sword-training frames
+            // via the common.FAS fallback. The real choreography lives in
+            // never-called trailing-underscore defs (`…_aa_`) that
+            // reference each scene's own frame bank (ids 4000+, visually
+            // verified). Rewire every stub to its orphaned body; `all`
+            // needs no override because it names the stubs. (The earlier
+            // maeka_dancer fix overrode `all` only — but the idle pool
+            // plays the expanded entry names, so the stubs still played
+            // sword frames.) maeka_dummy is deliberately NOT listed: its
+            // only defs ARE the sword stubs and no orphaned alternative
+            // exists — sword training is its original content, see
+            // analysis/MAEKA_WIRING.md.
+            const MAEKA_REAL_DEFS: &[(&str, &[(&str, &str)])] = &[
+                (
+                    "maeka_dancer",
+                    &[
+                        ("maeka_S021_Big_Dance_sequence_aa", "maeka_S021_Big_Dance_sequence_aa_"),
+                        ("maeka_S021_Big_Dance_sequence_ab", "maeka_S021_Big_Dance_sequence_ab_"),
+                    ],
+                ),
+                ("maeka_emerge", &[("maeka_CE005_startup", "maeka_CE005_startup_")]),
+                (
+                    "maeka_float",
+                    &[
+                        ("maeka_S002_sequence_aa", "maeka_S002_sequence_aa_"),
+                        ("maeka_S002_sequence_ab", "maeka_S002_sequence_ab_"),
+                    ],
+                ),
+                (
+                    "maeka_form",
+                    &[
+                        ("maeka_S015_Training_Bare_Hands_aa", "maeka_S015_Training_Bare_Hands_aa_"),
+                        ("maeka_S015_Training_Bare_Hands_ab", "maeka_S015_Training_Bare_Hands_ab_"),
+                        ("maeka_S015_Training_Bare_Hands_ac", "maeka_S015_Training_Bare_Hands_ac_"),
+                        ("maeka_S015_Training_Bare_Hands_ad", "maeka_S015_Training_Bare_Hands_ad_"),
+                        ("maeka_S015_Training_Bare_Hands_ae", "maeka_S015_Training_Bare_Hands_ae_"),
+                        ("maeka_S015_Training_Bare_Hands_af", "maeka_S015_Training_Bare_Hands_af_"),
+                        ("maeka_S015_Training_Bare_Hands_ag", "maeka_S015_Training_Bare_Hands_ag_"),
+                        ("maeka_S015_Training_Bare_Hands_ah", "maeka_S015_Training_Bare_Hands_ah_"),
+                    ],
+                ),
+                (
+                    "maeka_splash",
+                    &[("maeka_splash_aa", "maeka_splash_aa_"), ("maeka_splash_ab", "maeka_splash_ab_")],
+                ),
+            ];
+            if let Some(pairs) =
+                MAEKA_REAL_DEFS.iter().find(|(s, _)| *s == name).map(|(_, p)| *p)
+            {
+                for (stub, orphan) in pairs {
+                    if let Some(body) = rawmap.get(*orphan).cloned() {
+                        let v = faz::parse_reflist(&body)
+                            .into_iter()
+                            .map(|t| match t {
+                                faz::Tok::Frame { id, x, y, rep } => {
+                                    Def { id, x, y, rep, name: String::new(), sound: String::new() }
+                                }
+                                faz::Tok::Name { name, rep } => {
+                                    Def { id: 0, x: 0, y: 0, rep, name, sound: String::new() }
+                                }
+                                faz::Tok::Sound { name } => {
+                                    Def { id: 0, x: 0, y: 0, rep: 1, name: String::new(), sound: name }
+                                }
+                            })
+                            .collect();
+                        rawmap.insert(stub.to_string(), body);
+                        defmap.insert(stub.to_string(), v);
+                    }
                 }
             }
             scenes.insert(name.clone(), Scene { name: name.clone(), entries, defs: defmap, raw: rawmap, w, h });
@@ -481,6 +528,82 @@ mod tests {
                 }
             }
             assert!(painted, "{v}: no frame decodes to visible pixels");
+        }
+    }
+
+    /// Regression pin for the maeka stub rewiring (see MAEKA_REAL_DEFS in
+    /// `load`): every fixed scene's entry-reachable defs must reference
+    /// frames of its OWN bank, and those frames must not be the
+    /// sword-training frames the stubs used to fall back to. The four
+    /// `common_sword_training_*` defs in common.FAS reference ids 3..263
+    /// which decode from common_demo.FAS; the fixed scenes must paint
+    /// content outside that byte-set.
+    #[test]
+    fn maeka_rewired_scenes_are_not_sword_training() {
+        let s = load_char("maeka");
+        // Byte signatures of every frame the sword-training defs play.
+        let sword = s.scenes.get("common").expect("common behavior");
+        let mut sword_bytes: std::collections::HashSet<Vec<u8>> = Default::default();
+        for def in [
+            "common_sword_training_long",
+            "common_sword_training_long_flipped",
+            "common_sword_training_short",
+            "common_sword_training_short_flipped",
+        ] {
+            let mut n = 0;
+            for d in sword.defs.get(def).expect(def) {
+                if d.id != 0 {
+                    n += 1;
+                    if let Some(img) = s.frame("common_demo", d.id) {
+                        sword_bytes.insert(img.as_raw().clone());
+                    }
+                }
+            }
+            assert!(n > 0, "sword def {def} references no frames");
+        }
+        assert!(!sword_bytes.is_empty(), "no sword frames decoded");
+
+        for scene in ["maeka_dancer", "maeka_emerge", "maeka_float", "maeka_form", "maeka_splash"] {
+            let scn = s.scenes.get(scene).expect(scene);
+            // No entry-reachable scene-local def may name the sword stubs.
+            for (name, body) in &scn.raw {
+                assert!(
+                    !body.windows(14).any(|w| w == b"sword_training"),
+                    "{scene}: def {name} still references sword training"
+                );
+            }
+            // Walk defs reachable from the entries, descending only into
+            // scene-local defs (the behavior-side scaffolding — enter/exit/
+            // pause — is shared and out of scope for this pin).
+            let mut stack: Vec<String> = scn.entries.clone();
+            let mut seen = std::collections::HashSet::new();
+            let mut foreign = 0usize;
+            let mut total = 0usize;
+            while let Some(n) = stack.pop() {
+                if !seen.insert(n.clone()) {
+                    continue;
+                }
+                let Some(defs) = scn.defs.get(&n) else { continue };
+                for d in defs {
+                    if !d.name.is_empty() {
+                        stack.push(d.name.clone());
+                    } else if d.id != 0 {
+                        total += 1;
+                        if let Some(img) = s.frame(scene, d.id) {
+                            if !sword_bytes.contains(img.as_raw()) {
+                                foreign += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(total > 0, "{scene}: entries reference no frames at all");
+            // The choreographies are 100+ unique frames; before the fix the
+            // count was 0 (stubs referenced nothing of their own).
+            assert!(
+                foreign >= 50,
+                "{scene}: only {foreign}/{total} entry frames differ from sword training"
+            );
         }
     }
 }
