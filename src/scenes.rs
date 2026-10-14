@@ -399,5 +399,89 @@ mod tests {
             );
         }
     }
+    /// The 10 palette-swap variant scenes (dark, dummy, firedance, …) were
+    /// shipped frameless by the installer (truncated FAZ: script + palettes
+    /// only; their frames live in the touch/common behavior masters). They
+    /// are recovered by splicing the referenced frame blocks verbatim from
+    /// those masters (`analysis/m001_unpack.py`); each must now load as a
+    /// real playable scene: parse, non-placeholder, own frames for every
+    /// frame token its entry defs reference, and decodable pixels.
+    #[test]
+    fn maeka_variants_recovered_and_playable() {
+        const VARIANTS: &[&str] = &[
+            "maeka_dark",
+            "maeka_dummy",
+            "maeka_firedance",
+            "maeka_ignius",
+            "maeka_knife",
+            "maeka_rune",
+            "maeka_splash",
+            "maeka_strikes",
+            "maeka_veridius",
+            "maeka_white",
+        ];
+        let s = load_char("maeka");
+        for v in VARIANTS {
+            let f = s
+                .faz
+                .get(*v)
+                .unwrap_or_else(|| panic!("{v}: scene missing from asset tree"));
+            assert!(!faz::is_placeholder(f), "{v}: still a placeholder");
+            let scn = s.scenes.get(*v).unwrap();
+            assert!(!scn.entries.is_empty(), "{v}: no entries");
+            // Every frame token referenced by the defs reachable from the
+            // entry points (scene defs first, then behavior defs, like the
+            // runtime) must resolve to a frame.
+            let mut stack: Vec<String> = scn.entries.clone();
+            let mut seen = std::collections::HashSet::new();
+            let mut refs = Vec::new();
+            while let Some(n) = stack.pop() {
+                if !seen.insert(n.clone()) {
+                    continue;
+                }
+                let defs = scn
+                    .defs
+                    .get(&n)
+                    .or_else(|| {
+                        s.behaviors
+                            .iter()
+                            .filter_map(|b| s.scenes.get(b))
+                            .find_map(|b| b.defs.get(&n))
+                    });
+                for d in defs.into_iter().flatten() {
+                    if d.id != 0 || !d.name.is_empty() {
+                        refs.push((n.clone(), d.clone()));
+                    }
+                    if !d.name.is_empty() {
+                        stack.push(d.name.clone());
+                    }
+                }
+            }
+            assert!(!refs.is_empty(), "{v}: entry defs reference nothing");
+            for (def, d) in &refs {
+                if !d.name.is_empty() {
+                    continue; // named sub-defs: checked via the stack walk
+                }
+                assert!(
+                    s.frame(v, d.id).is_some(),
+                    "{v}: def {def} references frame {:04} that resolves nowhere",
+                    d.id
+                );
+            }
+            // Decoding must produce visible pixels somewhere (frame 0003
+            // is a legitimate all-transparent timing pose, so scan until a
+            // frame actually paints).
+            let mut painted = false;
+            for id in f.frames.keys() {
+                if let Some(img) = s.frame(v, *id as u32) {
+                    if img.pixels().any(|p| p[3] > 0) {
+                        painted = true;
+                        break;
+                    }
+                }
+            }
+            assert!(painted, "{v}: no frame decodes to visible pixels");
+        }
+    }
 }
 

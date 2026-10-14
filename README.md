@@ -91,6 +91,8 @@ analysis/
                    kept as the reference the Rust port and tests/faz_parity.rs
                    are validated against)
   pack_assets.py   packs original FAZ scenes -> assets/characters/<name>/scenes/*.bin.gz
+  m001_unpack.py   splices the frameless Maeka palette-swap variants
+                   (firedance etc.) from the touch/common behavior masters
   pack_classic.py  packs the early-set classic scenes -> scenes/*.bin.gz
   classic_survey.py md5 dedup of early sets vs shipped sets
   CLASSIC_MODE.md  classic-mode provenance, period label table, dedup stats
@@ -111,6 +113,13 @@ payloads under `analysis/`:
 ```sh
 python3 analysis/pack_assets.py            # all characters
 python3 analysis/pack_assets.py tahni      # or just one
+
+# Maeka's 10 palette-swap variants (firedance etc.) ship frameless in the
+# installer; splice them before packing:
+#   python3 analysis/ic4_extract.py Maeka.exe /tmp/maeka_streams
+#   python3 analysis/maeka.py /tmp/maeka_streams analysis/maeka_faz
+#   python3 analysis/m001_unpack.py /tmp/maeka_streams   # -> analysis/maeka_faz
+#   python3 analysis/pack_assets.py maeka
 ```
 
 Right-click: Touch her / Ask Tahni… / Next scene / Next character /

@@ -9,12 +9,15 @@ Stream kinds found there:
   * FAS masters (common, common_demo, common_enter*, touch, touch_demo):
     plain FAZ bytes, not scene files — skipped here (the engine takes entry
     points from each scene's own `all` defs).
-  * misc resources (config blob, MZ runtimes, 'SPACER'/'M001' index
-    containers): skipped.
+  * misc resources (config blob, MZ runtimes, sound archives — the
+    'SPACER'/'M001' streams are the DeskMate.WAS/DeskMates.Wa3 tables,
+    see extract_behaviors.py): skipped.
 
-Scenes that carry no pixel blocks (palette-swap variants whose frames live in
-the still unpacked M001 container) are skipped; all frame geometries the
-engine supports (any sane w/h at 4 or 8 bpp) are converted.
+Scenes that carry no pixel blocks (the palette-swap variants: the installer
+shipped them truncated, their frames live in the touch/common behavior
+masters) are skipped here; run m001_unpack.py after this script to splice
+them back. All frame geometries the engine supports (any sane w/h at 4 or
+8 bpp) are converted.
 
 Usage: python3 maeka.py <stream_dir> <out_dir>
 Then: python3 faz_convert.py <assets/characters/NAME> <out_dir>
