@@ -43,7 +43,7 @@ struct Row {
     expanded: bool,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Zone {
     Play,
     Mark,
@@ -59,6 +59,33 @@ struct Hit {
 
 fn in_rect(x: f64, y: f64, r: &(i32, i32, i32, i32)) -> bool {
     x >= r.0 as f64 && x < (r.0 + r.2) as f64 && y >= r.1 as f64 && y < (r.1 + r.3) as f64
+}
+
+/// Resolve a pointer position to the `(row, zone)` it lands on.
+///
+/// `x`/`y` MUST be physical pixels — the space the canvas is painted in
+/// and the space [`Hit`] rects are recorded in. winit 0.30 delivers
+/// `CursorMoved` in physical px on every Linux backend: X11 forwards the
+/// raw X event coords verbatim (`PhysicalPosition::new(event.event_x,
+/// event.event_y)` in `platform_impl/linux/x11/event_processor.rs`), and
+/// Wayland converts the compositor's logical position with
+/// `LogicalPosition(..).to_physical(scale_factor)` before emitting
+/// (`platform_impl/linux/wayland/seat/pointer/mod.rs`). Callers pass the
+/// position through unchanged; multiplying by `scale_factor` a second
+/// time (the old bug) landed every click at `scale x scale_factor` —
+/// invisible at 1x, wildly off down the list at 1.5x/2x.
+fn hit_test(hits: &[Hit], x: f64, y: f64) -> Option<(usize, Zone)> {
+    hits.iter().find(|h| in_rect(x, y, &h.rect)).map(|h| (h.row, h.zone))
+}
+
+/// Idempotent scroll clamp: `f(f(x)) == f(x)` for every input, so a
+/// configure/resize storm (tiling WM, DPI renegotiation) can never walk
+/// the list on its own — repeated clamps with unchanged counts are a
+/// no-op. Only a tree *reload* (character switch) resets the scroll to
+/// the top; a tree that merely shrinks (collapse while scrolled down)
+/// clamps into range without jumping to the top.
+fn clamp_scroll(scroll: usize, rows: usize, vis: usize) -> usize {
+    scroll.min(rows.saturating_sub(vis))
 }
 
 /// Startup parent pid. The forked browser is a direct child of the pet
@@ -243,13 +270,10 @@ impl Ui {
         }
         if in_rect(x, y, &self.tree_rect) {
             // Resolve the hit first, then act: the row borrow must end
-            // before the mutable play/mark/toggle handlers run.
-            let Some((rowi, zone)) = self
-                .hits
-                .iter()
-                .find(|h| in_rect(x, y, &h.rect))
-                .map(|h| (h.row, h.zone))
-            else {
+            // before the mutable play/mark/toggle handlers run. `x`/`y`
+            // arrive in physical px (see `hit_test`), matching the
+            // physical-px rects recorded by `render`.
+            let Some((rowi, zone)) = hit_test(&self.hits, x, y) else {
                 return;
             };
             let Some(row) = self.rows.get(rowi).cloned() else { return };
@@ -280,9 +304,9 @@ impl Ui {
     }
 
     fn scroll_by(&mut self, lines: i32) {
-        let vis = self.visible_rows().max(1) as i32;
-        let max = (self.rows.len() as i32 - vis).max(0);
-        self.scroll = ((self.scroll as i32 + lines).clamp(0, max)) as usize;
+        let vis = self.visible_rows().max(1);
+        let next = (self.scroll as i64 + lines as i64).max(0) as usize;
+        self.scroll = clamp_scroll(next, self.rows.len(), vis);
     }
 
     fn build_pixels(w: u32, h: u32, window: &Arc<Window>) -> Option<pixels::Pixels<'static>> {
@@ -396,7 +420,13 @@ impl Ui {
         retro::text(&mut canvas, w, h, &self.font, &t, "gate?", mark_x as f32 - 6.0 * s, hbase, retro::SHADOW);
         crate::fill_rect(&mut canvas, w, h, sep_x, ty + 2, 1, th - 4, retro::SHADOW);
         let vis = self.visible_rows();
-        for (vi, ri) in (self.scroll..self.rows.len()).enumerate().take(vis) {
+        // Clamp against the *current* row count without mutating
+        // `self.scroll`: a tree that shrinks under a stale scroll
+        // (collapse while scrolled down) must never index past the end,
+        // and a configure storm must never move the list on its own —
+        // only `select_character` resets the scroll.
+        let start = clamp_scroll(self.scroll, self.rows.len(), vis);
+        for (vi, ri) in (start..self.rows.len()).enumerate().take(vis) {
             let row = &self.rows[ri];
             let y = ty + 2 + hh + (vi as i32) * row_h;
             if y + row_h > ty + th {
@@ -582,9 +612,16 @@ pub fn run(character: &str) -> Result<(), Box<dyn std::error::Error>> {
                 el.set_control_flow(ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(250)));
             }
             WindowEvent::CursorMoved { position, .. } => {
-                // Rects are painted in physical px; winit delivers logical.
-                let sf = ui.window.as_ref().map_or(1.0, |w| w.scale_factor());
-                ui.mouse_pos = (position.x * sf, position.y * sf);
+                // winit 0.30 delivers CursorMoved in PHYSICAL px on both
+                // Linux backends: X11 forwards the raw X event coords
+                // (already physical), and Wayland converts the
+                // compositor's logical position with `to_physical(
+                // scale_factor)` before emitting. The hit rects are
+                // recorded in the same physical space the canvas paints
+                // in, so the position is consumed verbatim — the old
+                // `position * scale_factor` put every click at
+                // scale x scale_factor (fine at 1x, wildly off at 1.5x).
+                ui.mouse_pos = (position.x, position.y);
                 ui.window.as_ref().map(|w| w.request_redraw());
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
@@ -595,7 +632,11 @@ pub fn run(character: &str) -> Result<(), Box<dyn std::error::Error>> {
             WindowEvent::MouseWheel { delta, .. } => {
                 let lines = match delta {
                     MouseScrollDelta::LineDelta(_, y) => (y * 3.0) as i32,
-                    MouseScrollDelta::PixelDelta(p) => (p.y / 40.0) as i32,
+                    // Physical px on both backends (Wayland converts the
+                    // compositor's logical delta with to_physical); round
+                    // so a fractional-scale trackpad event under 20px
+                    // still scrolls a row instead of truncating to zero.
+                    MouseScrollDelta::PixelDelta(p) => (p.y / 40.0).round() as i32,
                 };
                 if lines != 0 {
                     ui.scroll_by(-lines);
@@ -632,4 +673,84 @@ pub fn run(character: &str) -> Result<(), Box<dyn std::error::Error>> {
         _ => {}
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two rows' Play zones painted in physical px at 1.5x: row 0 at
+    /// y 40..75, row 1 at y 75..110 (row_h = 35 physical px).
+    fn hits() -> Vec<Hit> {
+        vec![
+            Hit { row: 0, zone: Zone::Play, rect: (10, 40, 300, 35) },
+            Hit { row: 1, zone: Zone::Play, rect: (10, 75, 300, 35) },
+            Hit { row: 1, zone: Zone::Mark, rect: (330, 75, 30, 35) },
+        ]
+    }
+
+    #[test]
+    fn hit_test_consumes_x11_physical_coords_verbatim() {
+        // X11 (winit 0.30): the raw X event coords are forwarded as-is —
+        // physical px. A click in the middle of row 1's painted rect
+        // resolves to row 1, not to a scaled-up row index.
+        let h = hits();
+        assert_eq!(hit_test(&h, 100.0, 90.0), Some((1, Zone::Play)));
+        // The old bug multiplied by scale_factor again: 90 * 1.5 = 135
+        // falls past every rect — the click vanished (the "lucky
+        // double-click" symptom).
+        assert_eq!(hit_test(&h, 100.0, 90.0 * 1.5), None);
+    }
+
+    #[test]
+    fn hit_test_consumes_wayland_logical_coords_after_backend_scaling() {
+        // Wayland (winit 0.30, wayland/seat/pointer/mod.rs): the
+        // compositor reports LOGICAL coords and winit emits
+        // `LogicalPosition(..).to_physical(scale_factor)` — so by the
+        // time the app sees the event it is physical again. A pointer at
+        // logical (66.7, 60) on a 1.5x display arrives as physical
+        // (100, 90): row 1.
+        let scale_factor = 1.5f64;
+        let (logical_x, logical_y) = (100.0 / scale_factor, 90.0 / scale_factor);
+        let physical = (logical_x * scale_factor, logical_y * scale_factor);
+        let h = hits();
+        assert_eq!(hit_test(&h, physical.0, physical.1), Some((1, Zone::Play)));
+        // Feeding the raw logical coord instead — what the old code
+        // effectively did by double-scaling a correct physical coord, or
+        // by trusting logical delivery — resolves the pointer to the
+        // WRONG row (row 0 here, though the user aimed at row 1).
+        assert_eq!(hit_test(&h, logical_x, logical_y), Some((0, Zone::Play)));
+    }
+
+    #[test]
+    fn hit_test_marks_are_zones() {
+        let h = hits();
+        assert_eq!(hit_test(&h, 340.0, 90.0), Some((1, Zone::Mark)));
+        assert_eq!(hit_test(&h, 5.0, 90.0), None);
+    }
+
+    #[test]
+    fn clamp_scroll_is_idempotent_under_configure_storms() {
+        // 100 rows, 20 visible, scrolled to 50.
+        let once = clamp_scroll(50, 100, 20);
+        assert_eq!(once, 50);
+        // A storm of configure events re-clamps the clamped value: no
+        // drift, ever.
+        let mut s = once;
+        for _ in 0..1000 {
+            s = clamp_scroll(s, 100, 20);
+        }
+        assert_eq!(s, 50);
+    }
+
+    #[test]
+    fn clamp_scroll_bounds_tree_shrink_without_resetting() {
+        // Collapse while scrolled down: 100 -> 10 rows, 20 visible ->
+        // clamp to 0 (nothing to scroll).
+        assert_eq!(clamp_scroll(50, 10, 20), 0);
+        // Shrink but still scrollable: clamp to rows - vis, not to top.
+        assert_eq!(clamp_scroll(50, 30, 20), 10);
+        // vis larger than rows (tiny window): saturating, never underflow.
+        assert_eq!(clamp_scroll(50, 5, 20), 0);
+    }
 }
