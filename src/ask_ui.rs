@@ -606,17 +606,16 @@ pub fn run(ask: bool) -> Result<(), Box<dyn std::error::Error>> {
         }
         Event::WindowEvent { event, .. } => match event {
             WindowEvent::Resized(sz) => {
+                // Resize the EXISTING renderer in place: dropping it
+                // and building a fresh SurfaceTexture on the same
+                // window deadlocks the swapchain under llvmpipe/X11
+                // (black window; the new surface never presents). Same
+                // fix as review_ui; the pet window always did this.
                 if sz.width > 0 && sz.height > 0 && (sz.width, sz.height) != ui.size {
                     ui.size = (sz.width, sz.height);
-                    if let Some(w) = ui.window.clone() {
-                        // Old renderer must die BEFORE the new one is
-                        // built: each SurfaceTexture registers a
-                        // wp_surface_tearing_control_v1, and Wayland
-                        // rejects a second on the same surface.
-                        ui.pixels = None;
-                        if let Some(p) = Ui::build_pixels(sz.width, sz.height, &w) {
-                            ui.pixels = Some(p);
-                        }
+                    if let Some(px) = ui.pixels.as_mut() {
+                        let _ = px.resize_surface(sz.width, sz.height);
+                        let _ = px.resize_buffer(sz.width, sz.height);
                     }
                 }
             }

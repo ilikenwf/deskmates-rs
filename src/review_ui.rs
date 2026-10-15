@@ -125,11 +125,13 @@ fn parent_died(_start: u32) -> bool {
 
 /// The character's playable scenes, sorted: (scene name, entry names).
 /// Behaviors (common.FAS etc.) are def sources, never review rows —
-/// except `touch`: its *named voiced hotspot defs* (`T0x…….._Name`) are
+/// except `touch`: its *named hotspot defs* (`T0x…….._Name`) are
 /// curated exactly like entries (each is a click reaction with its own
-/// animation + voice line), so they appear as one synthetic "Touch
-/// reactions" scene. The state-machine aliases (`T0x……..up/down/...`)
-/// and bare frame refs are plumbing, not content: filtered out.
+/// animation, voiced or not — the silent `_DEMO` variants are real
+/// content too), so they appear as one synthetic "Touch reactions"
+/// scene. The state-machine aliases (`T0x……..up/down/...`), bare frame
+/// refs, and plumbing defs (`Out_Of_Bounds`, `BLANK`: the click-
+/// anywhere-else fallbacks) are filtered out.
 fn load_tree(character: &str) -> Vec<(String, Vec<String>)> {
     let dir = assets_root().join("characters").join(character);
     let Ok(sc) = crate::scenes::Scenes::load(&dir) else {
@@ -143,13 +145,14 @@ fn load_tree(character: &str) -> Vec<(String, Vec<String>)> {
         let mut defs: Vec<String> = t
             .raw
             .iter()
-            .filter(|(k, body)| {
-                // named voiced hotspot def: T0x + 6 hex + `_Name`, body
-                // carries at least one ` !sound` token
+            .filter(|(k, _)| {
+                // named hotspot def: T0x + 6 hex + `_Name`
                 k.starts_with("T0x")
                     && k.len() > 10
                     && k.as_bytes().get(9) == Some(&b'_')
-                    && body.windows(2).any(|w| w == b" !")
+                    && !k.contains("Out_Of_Bounds")
+                    && !k.contains("Out_of_bounds")
+                    && !k.ends_with("_BLANK")
             })
             .map(|(k, _)| k.clone())
             .collect();
@@ -811,45 +814,44 @@ pub fn run(character: &str) -> Result<(), Box<dyn std::error::Error>> {
         Event::WindowEvent { event, .. } => match event {
             WindowEvent::Resized(sz) => {
                 // Physical size changed (WM configure, DPI follow-up).
-                // The canvas and swapchain are sized in PHYSICAL px, so
-                // fractional scales must never truncate them: rebuild
-                // at the exact new size and repaint immediately.
+                // Resize the EXISTING renderer in place. Dropping it
+                // and building a fresh SurfaceTexture on the same
+                // window deadlocks the swapchain under llvmpipe/X11:
+                // the window goes black (or keeps presenting a stale
+                // quarter buffer) because the new surface never gets a
+                // first successful present. The pet window (main.rs)
+                // uses these same in-place calls and never breaks; the
+                // Wayland tearing-control concern that motivated the
+                // rebuild only applies to a *second* SurfaceTexture on
+                // one surface, which resize_surface never creates.
                 if sz.width > 0 && sz.height > 0 && (sz.width, sz.height) != ui.size {
                     ui.size = (sz.width, sz.height);
+                    if let Some(px) = ui.pixels.as_mut() {
+                        let _ = px.resize_surface(sz.width, sz.height);
+                        let _ = px.resize_buffer(sz.width, sz.height);
+                    }
                     if let Some(w) = ui.window.clone() {
-                        // Drop the OLD renderer BEFORE building the new
-                        // one: pixels::SurfaceTexture registers a
-                        // wp_surface_tearing_control_v1 per instance, and
-                        // Wayland rejects a second one on the same
-                        // surface -> Surface::configure validation error
-                        // (crash on KDE at map time, scale 1.8).
-                        ui.pixels = None;
-                        if let Some(p) = Ui::build_pixels(sz.width, sz.height, &w) {
-                            ui.pixels = Some(p);
-                        }
                         w.request_redraw();
                     }
                 }
             }
-            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+            WindowEvent::ScaleFactorChanged { .. } => {
                 // DPI change (monitor move / fractional-scale toggle).
                 // Metrics read `window.scale_factor()` live, but the
-                // canvas + swapchain are physical-px: rebuild now at the
-                // current inner size — winit *usually* follows with a
-                // Resized carrying the new physical size, yet when the
-                // physical size happens to be unchanged no Resized
-                // arrives, and skipping the rebuild would stretch the
-                // old buffer. Then repaint with the new metrics.
-                let _ = scale_factor;
+                // canvas + swapchain are physical px: resize in place
+                // at the current inner size — winit *usually* follows
+                // with a Resized carrying the new physical size, yet
+                // when the physical size happens to be unchanged no
+                // Resized arrives, and skipping the resize would
+                // stretch the old buffer. Then repaint with the new
+                // metrics.
                 if let Some(w) = ui.window.clone() {
                     let sz = w.inner_size();
                     if sz.width > 0 && sz.height > 0 {
                         ui.size = (sz.width, sz.height);
-                        // Old renderer must die first (see Resized:
-                        // tearing-control collision on Wayland).
-                        ui.pixels = None;
-                        if let Some(p) = Ui::build_pixels(sz.width, sz.height, &w) {
-                            ui.pixels = Some(p);
+                        if let Some(px) = ui.pixels.as_mut() {
+                            let _ = px.resize_surface(sz.width, sz.height);
+                            let _ = px.resize_buffer(sz.width, sz.height);
                         }
                     }
                     w.request_redraw();

@@ -61,12 +61,16 @@ pub const ADULT_SCENES: &[&str] = &[
 
 /// Adults-only **touch reactions** (the `T0x…….._Name` hotspot defs in
 /// each character's touch.FAS). Curated by visual inspection of 12-frame
-/// strips for every voiced named hotspot
-/// (`cargo test touch_strips -- --ignored`, 2026-10-14): same rule as
-/// scenes — exposed breasts/genitals gate; pastie-covered toplessness
-/// does NOT (Tahni's Secret A/B stop at pasties: no gate), butt-only
-/// views do not (FatB's Pixel Moon), and covered catsuit/leotard teasing
-/// does not (Kahli's Basic Instinct, Hot Touch, Bum Bump, Head Job).
+/// strips for every named hotspot, voiced or silent
+/// (`cargo test touch_strips -- --ignored`, 2026-10-14/15): same rule as
+/// scenes — exposed breasts/genitals gate; pastie/band-covered
+/// toplessness does NOT (Tahni's Secret_A_Tassles keeps its bra,
+/// Knickers_Fall keeps the band over her pussy), butt-only views do not
+/// (FatB's Pixel Moon, Tahni's Secret_C), and covered catsuit/leotard
+/// teasing does not (Hot Touch, Bum Bump, Head Job, Mega_Guns).
+/// Kahli's Basic Instinct DOES gate: the magnifying-glass zoom circle
+/// shows exposed breasts; Tahni's Flash_Tits despite its name shows
+/// fully exposed breasts.
 /// These are def names, not scene names, so they live outside
 /// `ADULT_SCENES` (whose existence test walks scene/entry containers).
 pub const ADULT_TOUCH: &[&str] = &[
@@ -78,6 +82,9 @@ pub const ADULT_TOUCH: &[&str] = &[
     "T0x8040ff_Breast_L_B_Shower",          // nude shower silhouette
     "T0xc0ffff_Breast_L_A_Shrink",           // shrinking bra, exposed
     "T0xff40ff_Breast_R_A_Ape_Shit",         // ape transformation nudity
+    "T0xff0000_Crotch_Bottom_Basic_Instinct", // leg spread + breast zoom circle
+    // Tahni
+    "T0x408000_Secret_B_Flash_Tits",         // top comes off: exposed breasts
     // Maeka
     "T0x003b7f_Pubes",                       // full frontal
     "T0x660066_Breast_L_DEMO",               // bare breasts (pasties)

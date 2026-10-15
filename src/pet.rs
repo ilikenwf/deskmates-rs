@@ -449,7 +449,7 @@ impl Pet {
             // the gate keys on the hotspot *color*: a color is gated
             // when its named def (`T0x…….._Name`) is. A gated zone
             // click falls back to a safe random reaction.
-            if self.adult || !Self::hotspot_gated(&base) {
+            if self.adult || !self.hotspot_gated(&base) {
                 self.play("touch", &def);
                 return;
             }
@@ -458,11 +458,23 @@ impl Pet {
     }
 
     /// True when the hotspot color `base` (`T0x` + 6 hex) belongs to a
-    /// gated named reaction.
-    fn hotspot_gated(base: &str) -> bool {
-        crate::adult::ADULT_TOUCH
-            .iter()
-            .any(|g| g.strip_prefix(base).is_some_and(|rest| rest.starts_with('_')))
+    /// gated named reaction **of this character**: colors are only
+    /// unique per touch.FAS, so the lookup resolves the color through
+    /// the loaded character's own named defs (Tahni's `T0xff0000_
+    /// Foot_L_Straw` must not inherit Kahli's gated `T0xff0000_Crotch_
+    /// Bottom_Basic_Instinct`).
+    fn hotspot_gated(&self, base: &str) -> bool {
+        self.scenes
+            .scenes
+            .get("touch")
+            .is_some_and(|t| {
+                t.raw.keys().any(|k| {
+                    k.starts_with(base)
+                        && k.len() > 10
+                        && k.as_bytes().get(9) == Some(&b'_')
+                        && crate::adult::is_adult_touch(k)
+                })
+            })
     }
     /// Play a touch-reaction definition by exact name (review-browser
     /// `touch:<def>` handoff). Returns false when the character has no
@@ -502,7 +514,7 @@ impl Pet {
                 .filter(|k| {
                     self.adult
                         || (!crate::adult::is_adult_touch(k)
-                            && !Self::hotspot_gated(&k.chars().take(9).collect::<String>()))
+                            && !self.hotspot_gated(&k.chars().take(9).collect::<String>()))
                 })
                 .cloned()
                 .collect();
@@ -960,18 +972,18 @@ mod gating_tests {
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/characters/kahli"),
         )
         .unwrap();
+        let mut pet = Pet::new(std::sync::Arc::new(sc), false);
         // Color-prefix predicate: gated named def colors yes, plain
         // hotspot colors no.
-        assert!(Pet::hotspot_gated("T0x454545")); // Secret_A_Lap_Dance
-        assert!(!Pet::hotspot_gated("T0x00ff00")); // Bum_Bump stays safe
-
-        let mut pet = Pet::new(std::sync::Arc::new(sc), false);
+        assert!(pet.hotspot_gated("T0x454545")); // Secret_A_Lap_Dance
+        assert!(pet.hotspot_gated("T0xff0000")); // Crotch_Bottom_Basic_Instinct
+        assert!(!pet.hotspot_gated("T0x00ff00")); // Bum_Bump stays safe
         for _ in 0..200 {
             pet.touch();
             let last = pet.recent.front().expect("touch played nothing");
             if last.0 == "touch" {
                 assert!(
-                    !Pet::hotspot_gated(&last.1.chars().take(9).collect::<String>()),
+                    !pet.hotspot_gated(&last.1.chars().take(9).collect::<String>()),
                     "gated touch reaction {} leaked with the gate closed",
                     last.1
                 );
@@ -982,12 +994,28 @@ mod gating_tests {
         for _ in 0..200 {
             pet.touch();
             if let Some(l) = pet.recent.front() {
-                if l.0 == "touch" && Pet::hotspot_gated(&l.1.chars().take(9).collect::<String>()) {
+                if l.0 == "touch" && pet.hotspot_gated(&l.1.chars().take(9).collect::<String>()) {
                     saw_gated = true;
                 }
             }
         }
         assert!(saw_gated, "gate open but no gated touch reaction ever played");
+    }
+
+    /// Hotspot colors are only unique per character: Tahni's `T0xff0000`
+    /// hotspot is the safe Foot_L_Straw reaction and must NOT inherit
+    /// Kahli's gated `T0xff0000_Crotch_Bottom_Basic_Instinct`; Tahni's
+    /// own gated color (`T0x408000` Flash_Tits) must gate.
+    #[test]
+    fn hotspot_gate_is_character_scoped() {
+        let sc = crate::scenes::Scenes::load(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/characters/tahni"),
+        )
+        .unwrap();
+        let pet = Pet::new(std::sync::Arc::new(sc), false);
+        assert!(!pet.hotspot_gated("T0xff0000"), "Tahni Foot_L_Straw must stay safe");
+        assert!(pet.hotspot_gated("T0x408000"), "Tahni Flash_Tits must gate");
+        assert!(!pet.hotspot_gated("T0x454545"), "Kahli's Lap_Dance color is unused on Tahni");
     }
 }
 

@@ -1143,9 +1143,10 @@ mod audit_strips {
 #[cfg(test)]
 mod touch_strips {
     use super::*;
-    /// Ignored diagnostic: 6-frame strip for every *named* voiced touch
-    /// hotspot def (frames live in the touch.FAS container itself), for
-    /// visual gating decisions on the suggestive zones.
+    /// Ignored diagnostic: 12-frame strip for every *named* touch
+    /// hotspot def (voiced or silent; frames live in the touch.FAS
+    /// container itself), for visual gating decisions on the
+    /// suggestive zones.
     #[test]
     #[ignore]
     fn touch_strips() {
@@ -1172,11 +1173,12 @@ mod touch_strips {
             }
             let mut seen: std::collections::HashSet<String> = Default::default();
             for (name, body) in all.iter() {
-                // named voiced hotspot defs only: T0x......_Name with a sound
+                // named hotspot defs only: T0x......_Name (voiced or
+                // silent — the silent DEMO variants need gating too)
                 if !name.starts_with("T0x") || !name.contains('_') {
                     continue;
                 }
-                if !body.windows(2).any(|w| w == b" !") || !seen.insert(name.clone()) {
+                if !seen.insert(name.clone()) {
                     continue;
                 }
                 // frame ids referenced by the body (4-5 digit runs)
