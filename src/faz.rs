@@ -682,18 +682,23 @@ pub fn decode_frame(f: &Faz, id: u16) -> Option<RgbaImage> {
     if blk.len() < stride * h as usize {
         return None;
     }
-    // Per-frame palette for count-table scenes: dibs[2*flag] (odd DIBs are
-    // tint masks); transparent key = last black (>=1) index, else 8.
+    // Per-frame palette: dibs[2*flag] (odd DIBs are tint masks);
+    // transparent key = last black (>=1) index, else 8. Every table
+    // format carries per-frame flag bytes and per-frame DIB palettes:
+    // kahli's frame 0 is encoded against dib2 (background black at
+    // index 10, gray at 8), oska's background black is index 9. Keying
+    // on index 8 unconditionally — or decoding flagged frames against
+    // dib0 — painted an opaque black box behind those characters.
     let pal: &Vec<u32>;
     let key: Option<usize>;
-    match (f.count_table, f.frame_flags.get(&id)) {
-        (true, Some(&flag)) => {
+    match f.frame_flags.get(&id) {
+        Some(&flag) => {
             pal = f.dibs.get(usize::from(flag).saturating_mul(2).min(f.dibs.len() - 1))?;
             let blacks: Vec<usize> =
                 (1..pal.len()).filter(|&j| (pal[j] & 0xFFFFFF) == 0).collect();
             key = Some(blacks.last().copied().unwrap_or(8));
         }
-        _ => {
+        None => {
             pal = f.dibs.first()?;
             key = None;
         }
@@ -1266,4 +1271,6 @@ mod touch_tests {
         assert!(hit, "no def color present in hotspot palette");
     }
 }
+
+
 

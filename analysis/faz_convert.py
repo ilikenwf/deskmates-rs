@@ -151,8 +151,10 @@ def main():
                 break
         if not entry_names:
             entry_names = [k for k in defs if k == name or k.startswith(name)]
-        # write frames; new-format scenes carry a per-frame DIB palette
-        # (dibs[2*flag], odd DIBs are tint masks) with its own black key index
+        # write frames; scenes carry a per-frame DIB palette
+        # (dibs[2*flag], odd DIBs are tint masks) with its own black key
+        # index — in BOTH table formats (kahli/oska old-table scenes key
+        # their background on a black index other than 8)
         fdir = os.path.join(OUT, 'frames', name)
         os.makedirs(fdir, exist_ok=True)
         pal = r['palette']
