@@ -84,6 +84,20 @@ fn hit_test(hits: &[Hit], x: f64, y: f64) -> Option<(usize, Zone)> {
     hits.iter().find(|h| in_rect(x, y, &h.rect)).map(|h| (h.row, h.zone))
 }
 
+/// Play-file payload that plays `row` on the pet, or `None` when the
+/// row has nothing to play (the synthetic Touch-reactions header).
+/// Touch-reaction entries ride the `touch:<def>` handoff: the defs live
+/// in the behaviors container, not the scene-entry table the
+/// `scene\nentry` protocol expects.
+fn handoff_for(row: &Row) -> Option<String> {
+    match &row.entry {
+        None if row.scene == TOUCH_SCENE => None,
+        Some(e) if row.scene == TOUCH_SCENE => Some(format!("touch:{e}")),
+        None => Some(format!("{}\n", row.scene)),
+        Some(e) => Some(format!("{}\n{e}\n", row.scene)),
+    }
+}
+
 /// Idempotent scroll clamp: `f(f(x)) == f(x)` for every input, so a
 /// configure/resize storm (tiling WM, DPI renegotiation) can never walk
 /// the list on its own — repeated clamps with unchanged counts are a
@@ -277,18 +291,25 @@ impl Ui {
         let _ = std::fs::write(&path, req);
     }
 
-    fn play_row(&mut self, row: &Row) {
-        match &row.entry {
-            // The synthetic header row has nothing to play; expand it.
-            None if row.scene == TOUCH_SCENE => {}
-            // Touch-reaction rows play through the `touch:<def>`
-            // handoff: the defs live in the behaviors container, not the
-            // scene-entry table the `scene\nentry` protocol expects.
-            Some(e) if row.scene == TOUCH_SCENE => self.send(&format!("touch:{e}")),
-            None => self.send(&format!("{}\n", row.scene)),
-            Some(e) => self.send(&format!("{}\n{e}\n", row.scene)),
+    /// Play the row; false when it has nothing to play (the synthetic
+    /// Touch-reactions header).
+    fn play_row(&mut self, row: &Row) -> bool {
+        match handoff_for(row) {
+            Some(payload) => {
+                self.send(&payload);
+                self.playing = Some((row.scene.clone(), row.entry.clone()));
+                true
+            }
+            None => false,
         }
-        self.playing = Some((row.scene.clone(), row.entry.clone()));
+    }
+
+    /// Expand/collapse a scene in place.
+    fn toggle_scene(&mut self, scene: &str) {
+        if !self.expanded.remove(scene) {
+            self.expanded.insert(scene.to_string());
+        }
+        self.rebuild_rows();
     }
 
     fn select_character(&mut self, idx: usize) {
@@ -378,25 +399,19 @@ impl Ui {
             Zone::Play => {
                 // The synthetic Touch header has nothing to play: its
                 // name cell expands/collapses like the triangle does.
-                if row.scene == TOUCH_SCENE {
-                    if !self.expanded.remove(&row.scene) {
-                        self.expanded.insert(row.scene.clone());
-                    }
-                    self.rebuild_rows();
-                } else {
-                    self.play_row(&row);
+                // Entry rows under it are real defs and MUST play — the
+                // old code tested `row.scene == TOUCH_SCENE` here and
+                // swallowed every touch/Secret click into a toggle.
+                if self.play_row(&row) {
                     self.status = format!("Playing {} on the pet.", row.name);
+                } else {
+                    self.toggle_scene(&row.scene);
                 }
             }
             Zone::Mark => {
                 self.toggle_mark(&row.name);
             }
-            Zone::Toggle => {
-                if !self.expanded.remove(&row.scene) {
-                    self.expanded.insert(row.scene.clone());
-                }
-                self.rebuild_rows();
-            }
+            Zone::Toggle => self.toggle_scene(&row.scene),
         }
         self.ensure_visible();
     }
@@ -1019,5 +1034,34 @@ mod tests {
         assert_eq!(clamp_scroll(50, 30, 20), 10);
         // vis larger than rows (tiny window): saturating, never underflow.
         assert_eq!(clamp_scroll(50, 5, 20), 0);
+    }
+
+    fn row(scene: &str, entry: Option<&str>) -> Row {
+        Row {
+            scene: scene.into(),
+            entry: entry.map(Into::into),
+            name: entry.unwrap_or(scene).into(),
+            gated: false,
+            expanded: false,
+        }
+    }
+
+    #[test]
+    fn handoff_touch_entries_play_and_only_the_header_toggles() {
+        // Regression: Zone::Play used to test `scene == TOUCH_SCENE`
+        // before consulting the entry, so EVERY touch reaction (the
+        // Secret_* hotspots included) collapsed/expanded the tree
+        // instead of playing. Only the synthetic header toggles.
+        assert_eq!(
+            handoff_for(&row(TOUCH_SCENE, Some("T0x454545_Secret_A_Lap_Dance"))).as_deref(),
+            Some("touch:T0x454545_Secret_A_Lap_Dance")
+        );
+        assert_eq!(handoff_for(&row(TOUCH_SCENE, None)), None);
+        // Real scenes keep the scene\nentry protocol.
+        assert_eq!(handoff_for(&row("kahli_s_tardis", None)).as_deref(), Some("kahli_s_tardis\n"));
+        assert_eq!(
+            handoff_for(&row("touch", Some("T0xff0000_Mouth_Kiss"))).as_deref(),
+            Some("touch\nT0xff0000_Mouth_Kiss\n")
+        );
     }
 }
